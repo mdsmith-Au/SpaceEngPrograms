@@ -60,6 +60,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AutoDoor.cs" />
+    <Compile Include="Elevator2.cs" />
     <Compile Include="Hangar.cs" />
     <Compile Include="Class1.cs" />
     <Compile Include="Hangar2.cs" />
