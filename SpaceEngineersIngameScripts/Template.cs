@@ -14,7 +14,7 @@ using Sandbox.Game.EntityComponents;
 using SpaceEngineers.Game.ModAPI.Ingame;
 using VRage.Game.ObjectBuilders.Definitions;
 
-namespace SpaceEngineers
+namespace SpaceEngineersTemplate
 {
     public sealed class Program : MyGridProgram
     {
