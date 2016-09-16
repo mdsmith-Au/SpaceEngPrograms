@@ -63,17 +63,20 @@ namespace LaserComm
         private Dictionary<long, string> oldLaserNames = new Dictionary<long, string>();
         private IMyTextPanel debugPanel;
         private IMyShipConnector connector;
+        private IMyRemoteControl remoteControl;
         private IEnumerator<bool> comm;
 
         private struct Destination
         {
             public List<Vector3D> approachPoints;
+            public List<string> vectorNames;
             public string name;
 
-            public Destination(List<Vector3D> _approachPoints, string _name)
+            public Destination(List<Vector3D> _approachPoints, List<string> _vectorNames, string _name)
             {
                 name = _name;
                 approachPoints = _approachPoints;
+                vectorNames = _vectorNames;
             }
         }
 
@@ -95,6 +98,10 @@ namespace LaserComm
                 else if (blk is IMyTextPanel)
                 {
                     debugPanel = blk as IMyTextPanel;
+                }
+                else if (!IS_BASE && blk is IMyRemoteControl)
+                {
+                    remoteControl = blk as IMyRemoteControl;
                 }
                 else if (IS_BASE && blk is IMyShipConnector )
                 {
@@ -123,7 +130,6 @@ namespace LaserComm
 
         public void Main(string args)
         {
-
             // Run state machine
             if (comm != null)
             {
@@ -260,16 +266,18 @@ namespace LaserComm
 
                         string[] coords = response.Replace(BLOCK_PREFIX, "").Split('|');
                         List<Vector3D> approachPos = new List<Vector3D>();
+                        List<string> names = new List<string>();
                         for (int i = 1; i < coords.Length; i++)
                         {
-                            string nm;
-                            Vector3D vec = convertToVector(coords[i], out nm);
+                            Vector3D vec;
+                            string nm = convertToVector(coords[i], out vec);
                             approachPos.Add(vec);
+                            names.Add(nm);
                         }
 
-                        string name;
-                        convertToVector(gps, out name);
-                        destinations.Add(new Destination(approachPos, name));
+                        Vector3D v;
+                        string name = convertToVector(gps, out v);
+                        destinations.Add(new Destination(approachPos, names, name));
                         
 
                         // We got our response for this GPS, move on to next one
@@ -294,7 +302,7 @@ namespace LaserComm
                     foreach (var lsr in lasers)
                     {
                         // If connected to something, check for message
-                        if (lsr.DetailedInfo.Contains("Connected to"))
+                        if (lsr.DetailedInfo.Contains("Rotating towards") || lsr.DetailedInfo.Contains("Connected to") )
                         {
                             string msg = lsr.DetailedInfo.Split(new String[] { "Connected to " }, StringSplitOptions.None)[1];
                             if (msg.Contains("REQUEST NAV"))
@@ -304,7 +312,24 @@ namespace LaserComm
 
                                 for (int i = 0; i < wpts.Count; i++)
                                 {
-                                    response = response + "|" + convertToGPS(i.ToString(), wpts[i]);
+                                    string nm;
+                                    switch (i)
+                                    {
+                                        case 0:
+                                            nm = "Begin Approach";
+                                            break;
+                                        case 1:
+                                            nm = "Final Approach";
+                                            break;
+                                        case 2:
+                                            nm = "Destination";
+                                            break;
+                                        default:
+                                            nm = "Unknown";
+                                            break;
+                                    }
+
+                                    response = response + "|" + convertToGPS(nm, wpts[i]);
                                 }
 
                                 lsr.SetCustomName(response);
@@ -353,11 +378,11 @@ namespace LaserComm
             return "GPS:" + name + ":" + vec.X.ToString("F2") + ":" + vec.Y.ToString("F2") + ":" + vec.Z.ToString("F2") + ":";
         }
 
-        private Vector3D convertToVector(string gps, out string name)
+        private string convertToVector(string gps, out Vector3D vec)
         {
             string[] splits = gps.Split(':');
-            name = splits[1];
-            return new Vector3D (Double.Parse(splits[2]), Double.Parse(splits[3]), Double.Parse(splits[4]) );
+            vec = new Vector3D (Double.Parse(splits[2]), Double.Parse(splits[3]), Double.Parse(splits[4]) );
+            return splits[1];
         }
 
         private void printPropertiesAndActions(IMyTerminalBlock block)
@@ -398,11 +423,11 @@ namespace LaserComm
 
         private string parseLaserName(string info)
         {
-            string[] splt = info.Split(new String[] { "Connected to " }, StringSplitOptions.None);
+            string[] splt = info.Split(new String[] { "Rotating towards " }, StringSplitOptions.None);
 
             if (splt.Length != 2)
             {
-                splt = info.Split(new String[] { "Rotating towards " }, StringSplitOptions.None);
+                splt = info.Split(new String[] { "Connected to " }, StringSplitOptions.None);
             }
 
             if (splt.Length == 2)
@@ -415,8 +440,6 @@ namespace LaserComm
             }
         }
 
-        // BaconArgs from http://forum.keenswh.com/threads/snippet-baconargs-argument-parser.7387036/
-        //public class BaconArgs { static public BaconArgs parse(string a) { return (new Parser()).parseArgs(a); } public class Parser { static Dictionary<string, BaconArgs> h = new Dictionary<string, BaconArgs>(); public BaconArgs parseArgs(string a) { if (!h.ContainsKey(a)) { var b = new BaconArgs(); var c = false; var d = false; var e = new StringBuilder(); for (int f = 0; f < a.Length; f++) { var g = a[f]; if (c) { e.Append(g); c = false; } else if (g.Equals('\\')) c = true; else if (d && !g.Equals('"')) e.Append(g); else if (g.Equals('"')) d = !d; else if (g.Equals(' ')) { b.add(e.ToString()); e.Clear(); } else e.Append(g); } if (e.Length > 0) b.add(e.ToString()); h.Add(a, b); } return h[a]; } } protected Dictionary<char, int> h = new Dictionary<char, int>(); protected List<string> i = new List<string>(); protected Dictionary<string, List<string>> j = new Dictionary<string, List<string>>(); public List<string> getArguments() { return i; } public int getFlag(char a) { return h.ContainsKey(a) ? h[a] : 0; } public List<string> getOption(string a) { return j.ContainsKey(a) ? j[a] : new List<string>(); } public void add(string a) { if (!a.StartsWith("-")) i.Add(a); else if (a.StartsWith("--")) { KeyValuePair<string, string> b = k(a); var c = b.Key.Substring(2); if (!j.ContainsKey(c)) j.Add(c, new List<string>()); j[c].Add(b.Value); } else { var b = a.Substring(1); for (int d = 0; d < b.Length; d++) if (this.h.ContainsKey(b[d])) { this.h[b[d]]++; } else { this.h.Add(b[d], 1); } } } KeyValuePair<string, string> k(string a) { string[] b = a.Split(new char[] { '=' }, 2); return new KeyValuePair<string, string>(b[0], (b.Length > 1) ? b[1] : null); } override public string ToString() { var a = new List<string>(); foreach (string key in j.Keys) a.Add(l(key) + ":[" + string.Join(",", j[key].ConvertAll<string>(b => l(b)).ToArray()) + "]"); var c = new List<string>(); foreach (char key in h.Keys) c.Add(key + ":" + h[key].ToString()); var d = new StringBuilder(); d.Append("{\"a\":["); d.Append(string.Join(",", i.ConvertAll<string>(b => l(b)).ToArray())); d.Append("],\"o\":[{"); d.Append(string.Join("},{", a)); d.Append("}],\"f\":[{"); d.Append(string.Join("},{", c)); d.Append("}]}"); return d.ToString(); } string l(string a) { return (a != null) ? "\"" + a.Replace(@"\", @"\\").Replace(@"""", @"\""") + "\"" : @"null"; } }
         //=======================================================================
         //////////////////////////END////////////////////////////////////////////
         //=======================================================================
