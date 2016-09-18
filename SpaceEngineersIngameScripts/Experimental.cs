@@ -12,6 +12,7 @@ using VRage.Collections;
 using VRage.Game.ObjectBuilders.Definitions;
 using VRage.Game.ModAPI.Ingame;
 using SpaceEngineers.Game.ModAPI.Ingame;
+using Sandbox.Game.Entities;
 
 namespace Experimental
 {
@@ -23,44 +24,57 @@ namespace Experimental
 
         const string DOCK_NAME = "[DOCK]";
 
-        const bool APPROACH_RIGHT = true;
-
         IMyShipConnector conn;
+        IMyTextPanel text;
 
         public Program()
         {
-            List<IMyShipConnector> blks = new List<IMyShipConnector>();
-            GridTerminalSystem.GetBlocksOfType(blks, isDock);
-
-            if (blks.Count > 0)
-            {
-                conn = blks[0];
-            }
-
+            conn = GridTerminalSystem.GetBlockWithName("[DOCK] Connector") as IMyShipConnector;
+            text = GridTerminalSystem.GetBlockWithName("[DOCK] Debug LCD") as IMyTextPanel;
         }
+
+
 
         public void Main(string args)
         {
-            MatrixD wm = conn.WorldMatrix;
+            MatrixD orientation = conn.WorldMatrix.GetOrientation();
+            Vector3D location = conn.GetPosition();
+            Vector3D ori = orientation.Left;
 
-            // destination for ship connector = our connector + 2.5m forward
-            Vector3D destFinal = conn.GetPosition() + 2.5 * wm.Forward;
+            text.WritePublicText(convertToGPS("Left", 2.5*ori + location));
+            //Echo("Left: " + ori.ToString());
 
-            // to line up, specify waypoint before
-            Vector3D destPreFinal;
-            if (APPROACH_RIGHT)
-            {
-                destPreFinal = destFinal + wm.Right * 100;
-            }
-            else
-            {
-                destPreFinal = destFinal + wm.Left * 100;
-            }
+            ori = orientation.Right;
+
+            text.WritePublicText(convertToGPS("Right", 2.5*ori + location), true);
+            //Echo("Right: " + ori.ToString());
 
 
-            // When received by ship, ship needs to assume these are for the connector and to shift by appropriate amount to remote control center
+            ori = orientation.Down;
+            text.WritePublicText(convertToGPS("Down", 2.5*ori + location), true);
+            //Echo("Down: " + ori.ToString());
+
+            ori = orientation.Up;
+            text.WritePublicText(convertToGPS("Up", 2.5*ori + location), true);
+            //Echo("Up: " + ori.ToString());
+
 
         }
+
+
+        private string convertToGPS(string name, Vector3D vec)
+        {
+            //GPS:[DOCK] Laser Antenna:-163.48:-14.56:-40.83:
+            return "GPS:" + name + ":" + vec.X.ToString("F2") + ":" + vec.Y.ToString("F2") + ":" + vec.Z.ToString("F2") + ":";
+        }
+
+        private string convertToVector(string gps, out Vector3D vec)
+        {
+            string[] splits = gps.Split(':');
+            vec = new Vector3D(Double.Parse(splits[2]), Double.Parse(splits[3]), Double.Parse(splits[4]));
+            return splits[1];
+        }
+
 
         public void Save()
         { }
