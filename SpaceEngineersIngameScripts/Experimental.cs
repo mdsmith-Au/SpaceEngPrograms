@@ -24,73 +24,20 @@ namespace Experimental
 
         const string DOCK_NAME = "[DOCK]";
 
-        IMyShipConnector conn;
-        IMyGyro gyro;
-        IMyRemoteControl remote;
-        IMyTextPanel debugPanel;
+        IMyTimerBlock time;
 
         MatrixD stationMatrix;
 
         public Program()
         {
-            conn = GridTerminalSystem.GetBlockWithName("Connector") as IMyShipConnector;
-            gyro = GridTerminalSystem.GetBlockWithName("Gyroscope") as IMyGyro;
-            remote = GridTerminalSystem.GetBlockWithName("Remote Control") as IMyRemoteControl;
-            debugPanel = GridTerminalSystem.GetBlockWithName("LCD Panel") as IMyTextPanel;
-
-            stationMatrix = conn.WorldMatrix;
-
-            debugPanel.WritePublicText("Default forward:\n");
-            debugPanel.WritePublicText(stationMatrix.Forward.ToString(), true);
-            debugPanel.WritePublicText("Modified forward = left:\n", true);
-            stationMatrix.Forward = stationMatrix.Left;
-            debugPanel.WritePublicText(stationMatrix.Forward.ToString(), true);
-
-            //stationMatrix.Forward = stationMatrix.Left;
+            time = GridTerminalSystem.GetBlockWithName("[DOCK] Timer") as IMyTimerBlock;
         }
 
 
 
         public void Main(string args)
         {
-            Echo("Running...");
-            MatrixD shipMatrix = remote.WorldMatrix;
-            debugPanel.WritePrivateText("Desired forward:\n");
-            debugPanel.WritePrivateText(stationMatrix.Forward.ToString(), true);
-            debugPanel.WritePrivateText("Actual ship forward:\n", true);
-            debugPanel.WritePrivateText(shipMatrix.Forward.ToString(), true);
-
-            QuaternionD target = QuaternionD.CreateFromRotationMatrix(stationMatrix.GetOrientation());
-            //QuaternionD target = QuaternionD.CreateFromTwoVectors(stationMatrix.Forward, stationMatrix.Up);
-
-            string qstring = target.ToString();
-
-            string[] splts = qstring.Split(new String[] { " " }, StringSplitOptions.RemoveEmptyEntries);
-            Echo("Split num: ");
-            Echo(splts.Length.ToString());
-
-            foreach (var str in splts)
-            {
-                Echo("--" + str + "\n");
-            }
-
-            QuaternionD current = QuaternionD.CreateFromRotationMatrix(shipMatrix.GetOrientation());
-
-            QuaternionD rotation = target / current;
-            Vector3D axis;
-            double angle;
-            rotation.GetAxisAngle(out axis, out angle);
-
-            MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
-            Vector3D localAxis = Vector3D.Transform(axis, worldToGyro);
-
-            double value = Math.Log(angle + 1, 2);
-            localAxis *= value < 0.001 ? 0 : value;
-            gyro.SetValueBool("Override", true);
-            gyro.SetValueFloat("Power", 1f);
-            gyro.SetValue("Pitch", (float)localAxis.X);
-            gyro.SetValue("Yaw", (float)-localAxis.Y);
-            gyro.SetValue("Roll", (float)-localAxis.Z);
+            printPropertiesAndActions(time);
         }
 
 

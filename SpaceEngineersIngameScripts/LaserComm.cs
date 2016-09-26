@@ -24,6 +24,8 @@ namespace LaserComm
 
 
         // Constants
+
+        #region constants
         private const string BLOCK_PREFIX = "[DOCK]";
 
         private const float FINAL_APPROACH_DIST = 100;
@@ -32,9 +34,11 @@ namespace LaserComm
 
         private const float DEPARTURE_DIST = 200;
 
-        private const int SECONDS_TO_WAIT_FOR_RESPONSE = 15;
+        private const long SECONDS_TO_WAIT_FOR_RESPONSE = 20;
 
+        private const long DOCKING_TIME_SECONDS = 20;
 
+        #endregion constants
 
         private IMyTextPanel debugPanel;
         IMyTextPanel messageReceiver;
@@ -77,6 +81,7 @@ namespace LaserComm
 
         private void init()
         {
+            #region initialization
             all_blocks_found = true;
 
             autopilot_en = true;
@@ -84,6 +89,14 @@ namespace LaserComm
             IS_BASE = Me.CustomName.Contains("[BASE]") ? true : false;
 
             DOCK_LEFT = Me.CustomName.Contains("[LEFT]") ? true : false;
+
+            debugPanel = null;
+            messageReceiver = null;
+            WANProgram = null;
+            connector = null;
+            remoteControl = null;
+            door = null;
+            timer = null;
 
             List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
             GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks, hasPrefix);
@@ -116,7 +129,9 @@ namespace LaserComm
                 }
                 else if (!IS_BASE && blk is IMyGyro)
                 {
-                    gyros.Add(blk as IMyGyro);
+                    IMyGyro g = blk as IMyGyro;
+                    gyros.Add(g);
+
                 }
                 else if (!IS_BASE && blk is IMyTimerBlock)
                 {
@@ -124,6 +139,9 @@ namespace LaserComm
                     timer.SetValueFloat("TriggerDelay", 1.0f);
                 }
             }
+
+            // Make sure all gyros reset
+            resetGyros();
 
             blks.Clear();
             GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(blks, hasWANRPrefix);
@@ -183,17 +201,29 @@ namespace LaserComm
             }
 
             comm = communicate().GetEnumerator();
+            fly = null;
+            #endregion
         }
 
         public void Main(string args)
         {
+            #region autoGridBlockAdd
             List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
             GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks);
-            if (!all_blocks_found || blks.Count != num_blocks_found)
+            bool connLock = false;
+            try
+            {
+                connLock = connector.IsLocked;
+            }
+            // Do nothing for catch
+            catch { }
+
+            if (!connLock && (!all_blocks_found || blks.Count != num_blocks_found))
             {
                 init();
-                return;
             }
+
+            #endregion
 
             // Run state machine
             if (comm != null)
@@ -206,18 +236,18 @@ namespace LaserComm
                 {
                     if (IS_BASE)
                     {
-                        Echo("Runing base...");
+                        Echo("Running base...");
                     }
                     else
                     {
                         Echo("Running ship...");
                     }
-                    Echo("Current time: " + DateTime.Now.ToLongTimeString());
                     return;
                 }
             }
 
-            // NOTE: base code never gets here
+
+            // NOTE: base code never (should) get here
 
             if (destinations.Count == 0)
             {
@@ -227,6 +257,7 @@ namespace LaserComm
                 return;
             }
 
+            #region debugPanelWrite
             debugPanel.WritePublicText("Destinations:\n");
 
             foreach (var dst in destinations)
@@ -235,10 +266,12 @@ namespace LaserComm
                 debugPanel.WritePublicText("Locations:\n", true);
                 foreach (var pt in dst.waypoints)
                 {
-                    debugPanel.WritePublicText(pt, true);
+                    debugPanel.WritePublicText(pt + "\n", true);
                 }
             }
+            #endregion
 
+            // Create autopilot instance if appropriate
             if (!IS_BASE && comm == null && fly == null && autopilot_en && destinations.Count > 0)
             {
                 fly = autopilot().GetEnumerator();
@@ -263,26 +296,22 @@ namespace LaserComm
 
         public IEnumerable<bool> autopilot()
         {
+            #region autopilot
             // Clear all waypoints, turn off collision avoidance and docking mode
             remoteControl.ClearWaypoints();
+            //remoteControl.ApplyAction("CollisionAvoidance_On");
             remoteControl.ApplyAction("CollisionAvoidance_Off");
             remoteControl.ApplyAction("DockingMode_Off");
 
             Echo("Setting destination...");
 
-            foreach (var gyro in gyros)
-            {
-                gyro.SetValueBool("Override", false);
-                gyro.SetValueFloat("Power", 1f);
-            }
-
-            yield return true;
+            // Make sure all gyros set to no override
+            resetGyros();
 
             // For each destination base...
             foreach (var location in destinations)
             {
 
-                // Add all waypoints except destination and departure
                 List<Vector3D> departurePoints = new List<Vector3D>();
                 List<Vector3D> approachPoints = new List<Vector3D>();
                 Vector3D destination = new Vector3D();
@@ -290,10 +319,12 @@ namespace LaserComm
                 Vector3D downOrient = new Vector3D();
                 Vector3D fwdOrient = new Vector3D();
 
+                // Go through list of received points
                 foreach (var pt in location.waypoints)
                 {
                     Echo("Adding point " + pt);
 
+                    // Interpret GPS points
                     Vector3D vec;
                     string ptName = convertToVector(pt, out vec);
                     ptName = ptName.ToLower();
@@ -311,6 +342,7 @@ namespace LaserComm
                         }
                     }
 
+                    // Other cases
                     else if (ptName.Contains("approach"))
                     {
                         approachPoints.Add(vec);
@@ -359,6 +391,7 @@ namespace LaserComm
                 // We're close, enable docking mode
                 Echo("Enabled docking mode; close to destination");
                 remoteControl.ApplyAction("DockingMode_On");
+                //remoteControl.ApplyAction("CollisionAvoidance_Off");
 
                 // Calculate offset now that we are properly rotated
                 Vector3D offset = remoteControl.GetPosition() - connector.GetPosition();
@@ -401,26 +434,95 @@ namespace LaserComm
                 // Wait for autopilot to arrive
                 while (remoteControl.IsAutoPilotEnabled)
                 {
-                    yield return true;
+                    // If connector becomes connected, disable autopilot
+                    if (connector.IsConnected)
+                    {
+                        remoteControl.SetAutoPilotEnabled(false);
+                    }
+                    else
+                    {
+                        yield return true;
+                    }
+
                 }
 
                 remoteControl.ClearWaypoints();
 
                 remoteControl.ApplyAction("DockingMode_Off");
 
+                // We're here, do a final orientation to make sure connector lines up if we're not already connected
+                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
+                {
+                    // If connector becomes connected, stop
+                    if (connector.IsConnected)
+                    {
+                        resetGyros();
+                        break;
+                    }
+                    else
+                    {
+                        yield return true;
+                    }
+                }
+                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                {
+                    // If connector becomes connected, stop
+                    if (connector.IsConnected)
+                    {
+                        resetGyros();
+                        break;
+                    }
+                    else
+                    {
+                        yield return true;
+                    }
+                }
+
                 Echo("Arrived at destination");
-                autopilot_en = false;
 
                 connector.ApplyAction("Lock");
 
-                // TODO: add docking procedure
-                yield return false;
+                // Wait certain amount of time before undocking
+                long startTick = DateTime.Now.Ticks;
+
+                while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
+                {
+                    Echo("Waiting to undock");
+                    yield return true;
+                }
+
+                // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
+
+                offset = remoteControl.GetPosition() - connector.GetPosition();
+
+                connector.ApplyAction("Unlock");
+
+                for (int i = 0; i < departurePoints.Count; i++)
+                {
+                    remoteControl.AddWaypoint(departurePoints[i] + offset, "Departure " + (i + 1).ToString());
+                }
+
+                remoteControl.SetAutoPilotEnabled(true);
+
+                while (remoteControl.IsAutoPilotEnabled)
+                {
+                    yield return true;
+                }
+
+                // We've departed; clear waypoints and renable collision avoidance
+                remoteControl.ClearWaypoints();
+                //remoteControl.ApplyAction("CollisionAvoidance_On");
+
             }
 
+            yield return false;
+            autopilot_en = false;
 
+            #endregion
         }
 
-
+        // Thanks to albmar @ http://forum.keenswh.com/threads/how-can-i-roll-my-ship-to-align-its-floor-with-the-floor-of-a-station.7382390/#post-1286963408
+        // So I did take a university level analytical mechanics course at one point but it turns out I forgot everything so thanks for the save
         private bool rotate(Vector3D destOrient, Vector3D curOrient)
         {
             bool doneRotating = false;
@@ -450,6 +552,7 @@ namespace LaserComm
 
                 gyro.SetValueBool("Override", true);
                 gyro.SetValueFloat("Power", 1f);
+                // Seems at some point KSH changed the signs on pitch/yaw/roll
                 gyro.SetValue("Pitch", (float)-localAxis.X);
                 gyro.SetValue("Yaw", (float)localAxis.Y);
                 gyro.SetValue("Roll", (float)localAxis.Z);
@@ -457,16 +560,22 @@ namespace LaserComm
 
             if (doneRotating)
             {
-                foreach (var gyro in gyros)
-                {
-                    gyro.SetValueBool("Override", false);
-                }
+                resetGyros();
             }
 
             timer.ApplyAction("TriggerNow");
 
             return doneRotating;
 
+        }
+
+        private void resetGyros()
+        {
+            foreach (var gyro in gyros)
+            {
+                gyro.SetValueFloat("Power", 1f);
+                gyro.SetValueBool("Override", false);
+            }
         }
 
         public IEnumerable<bool> communicate()
@@ -490,7 +599,7 @@ namespace LaserComm
                 // Keep processing new messages until we timeout waiting for any more potential responses
                 // This is because we don't know how many locations may send in responses
                 long ticks = DateTime.Now.Ticks;
-                while (DateTime.Now.Ticks - ticks < 10000000 * SECONDS_TO_WAIT_FOR_RESPONSE)
+                while (DateTime.Now.Ticks - ticks < 10000000L * SECONDS_TO_WAIT_FOR_RESPONSE)
                 {
 
                     // Now check text panel for response
@@ -515,7 +624,7 @@ namespace LaserComm
                     messageReceiver.WritePrivateText("");
 
                     Echo("Processing responses");
-                    string[] uniqueResponses = response.Split(';');
+                    string[] uniqueResponses = response.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
 
                     foreach (var resp in uniqueResponses)
                     {
@@ -628,40 +737,21 @@ namespace LaserComm
         private List<string> getWaypoints()
         {
             // Final destionation: 2.5m in front of connector
+            // Add +0.1 so that we don't hit connector itself
 
+            // Set final point in front of connector
             Vector3D finalPt = connector.GetPosition() + 2.6 * connector.WorldMatrix.GetOrientation().Forward;
+            // Add a small offset to that the autopilot will try and go slightly past the connector
+            finalPt += 0.2 * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
+
             Vector3D finalApproach = DOCK_LEFT ? finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
             Vector3D beginApproach = DOCK_LEFT ? finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
-            Vector3D departure = finalPt + DEPARTURE_DIST * connector.WorldMatrix.GetOrientation().Forward;
+            Vector3D departure = finalPt + DEPARTURE_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
 
             Vector3D down = door.WorldMatrix.GetOrientation().Down;
             Vector3D shipFwd = DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left;
 
             return new List<string> { convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
-        }
-
-        private string parseLaserName(string info)
-        {
-            string[] splt = info.Split(new String[] { "Rotating towards " }, StringSplitOptions.None);
-
-            if (splt.Length != 2)
-            {
-                splt = info.Split(new String[] { "Connected to " }, StringSplitOptions.None);
-            }
-
-            if (splt.Length != 2)
-            {
-                splt = info.Split(new String[] { "Trying to establish connection to " }, StringSplitOptions.None);
-            }
-
-            if (splt.Length == 2)
-            {
-                return splt[1];
-            }
-            else
-            {
-                return "";
-            }
         }
 
         //=======================================================================
