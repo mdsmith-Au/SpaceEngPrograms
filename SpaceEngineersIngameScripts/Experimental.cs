@@ -25,54 +25,72 @@ namespace Experimental
         const string DOCK_NAME = "[DOCK]";
 
         IMyShipConnector conn;
-        IMyTextPanel text;
+        IMyGyro gyro;
+        IMyRemoteControl remote;
+        IMyTextPanel debugPanel;
+
+        MatrixD stationMatrix;
 
         public Program()
         {
-            conn = GridTerminalSystem.GetBlockWithName("[DOCK] Connector") as IMyShipConnector;
-            text = GridTerminalSystem.GetBlockWithName("[DOCK] Debug LCD") as IMyTextPanel;
+            conn = GridTerminalSystem.GetBlockWithName("Connector") as IMyShipConnector;
+            gyro = GridTerminalSystem.GetBlockWithName("Gyroscope") as IMyGyro;
+            remote = GridTerminalSystem.GetBlockWithName("Remote Control") as IMyRemoteControl;
+            debugPanel = GridTerminalSystem.GetBlockWithName("LCD Panel") as IMyTextPanel;
+
+            stationMatrix = conn.WorldMatrix;
+
+            debugPanel.WritePublicText("Default forward:\n");
+            debugPanel.WritePublicText(stationMatrix.Forward.ToString(), true);
+            debugPanel.WritePublicText("Modified forward = left:\n", true);
+            stationMatrix.Forward = stationMatrix.Left;
+            debugPanel.WritePublicText(stationMatrix.Forward.ToString(), true);
+
+            //stationMatrix.Forward = stationMatrix.Left;
         }
 
 
 
         public void Main(string args)
         {
-            MatrixD orientation = conn.WorldMatrix.GetOrientation();
-            Vector3D location = conn.GetPosition();
-            Vector3D ori = orientation.Left;
+            Echo("Running...");
+            MatrixD shipMatrix = remote.WorldMatrix;
+            debugPanel.WritePrivateText("Desired forward:\n");
+            debugPanel.WritePrivateText(stationMatrix.Forward.ToString(), true);
+            debugPanel.WritePrivateText("Actual ship forward:\n", true);
+            debugPanel.WritePrivateText(shipMatrix.Forward.ToString(), true);
 
-            text.WritePublicText(convertToGPS("Left", 2.5*ori + location));
-            //Echo("Left: " + ori.ToString());
+            QuaternionD target = QuaternionD.CreateFromRotationMatrix(stationMatrix.GetOrientation());
+            //QuaternionD target = QuaternionD.CreateFromTwoVectors(stationMatrix.Forward, stationMatrix.Up);
 
-            ori = orientation.Right;
+            string qstring = target.ToString();
 
-            text.WritePublicText(convertToGPS("Right", 2.5*ori + location), true);
-            //Echo("Right: " + ori.ToString());
+            string[] splts = qstring.Split(new String[] { " " }, StringSplitOptions.RemoveEmptyEntries);
+            Echo("Split num: ");
+            Echo(splts.Length.ToString());
 
+            foreach (var str in splts)
+            {
+                Echo("--" + str + "\n");
+            }
 
-            ori = orientation.Down;
-            text.WritePublicText(convertToGPS("Down", 2.5*ori + location), true);
-            //Echo("Down: " + ori.ToString());
+            QuaternionD current = QuaternionD.CreateFromRotationMatrix(shipMatrix.GetOrientation());
 
-            ori = orientation.Up;
-            text.WritePublicText(convertToGPS("Up", 2.5*ori + location), true);
-            //Echo("Up: " + ori.ToString());
+            QuaternionD rotation = target / current;
+            Vector3D axis;
+            double angle;
+            rotation.GetAxisAngle(out axis, out angle);
 
+            MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
+            Vector3D localAxis = Vector3D.Transform(axis, worldToGyro);
 
-        }
-
-
-        private string convertToGPS(string name, Vector3D vec)
-        {
-            //GPS:[DOCK] Laser Antenna:-163.48:-14.56:-40.83:
-            return "GPS:" + name + ":" + vec.X.ToString("F2") + ":" + vec.Y.ToString("F2") + ":" + vec.Z.ToString("F2") + ":";
-        }
-
-        private string convertToVector(string gps, out Vector3D vec)
-        {
-            string[] splits = gps.Split(':');
-            vec = new Vector3D(Double.Parse(splits[2]), Double.Parse(splits[3]), Double.Parse(splits[4]));
-            return splits[1];
+            double value = Math.Log(angle + 1, 2);
+            localAxis *= value < 0.001 ? 0 : value;
+            gyro.SetValueBool("Override", true);
+            gyro.SetValueFloat("Power", 1f);
+            gyro.SetValue("Pitch", (float)localAxis.X);
+            gyro.SetValue("Yaw", (float)-localAxis.Y);
+            gyro.SetValue("Roll", (float)-localAxis.Z);
         }
 
 

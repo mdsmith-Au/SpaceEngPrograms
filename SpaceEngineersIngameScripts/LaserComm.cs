@@ -22,9 +22,9 @@ namespace LaserComm
         //////////////////////////BEGIN//////////////////////////////////////////
         //=======================================================================
 
-        private const string BLOCK_PREFIX = "[DOCK]";
 
-        private bool DOCK_LEFT;
+        // Constants
+        private const string BLOCK_PREFIX = "[DOCK]";
 
         private const float FINAL_APPROACH_DIST = 100;
 
@@ -34,27 +34,7 @@ namespace LaserComm
 
         private const int SECONDS_TO_WAIT_FOR_RESPONSE = 15;
 
-        private bool IS_BASE;
 
-        // Examples:
-        /*
-        With one GPS:
-        -------
-        private List<string> GPS_COORDINATES = new List<string>
-        {
-            "GPS:Receiver Laser Antenna:4.41:3.8:-7.09:"
-        };
-        -------
-        With two GPS:
-        -------
-        private List<string> GPS_COORDINATES = new List<string>
-        {
-            "GPS:Receiver Laser Antenna:4.41:3.8:-7.09:",
-            "GPS:Bob's Antenna:44.31:-9.8:-12.88:"
-        };
-        -------
-        and so on...
-        */
 
         private IMyTextPanel debugPanel;
         IMyTextPanel messageReceiver;
@@ -72,6 +52,9 @@ namespace LaserComm
         private int num_blocks_found;
 
         private bool autopilot_en;
+
+        private bool IS_BASE;
+        private bool DOCK_LEFT;
 
         private struct Destination
         {
@@ -240,7 +223,7 @@ namespace LaserComm
             {
                 Echo("Error: no destinations received");
                 init();
-                
+
                 return;
             }
 
@@ -280,6 +263,7 @@ namespace LaserComm
 
         public IEnumerable<bool> autopilot()
         {
+            // Clear all waypoints, turn off collision avoidance and docking mode
             remoteControl.ClearWaypoints();
             remoteControl.ApplyAction("CollisionAvoidance_Off");
             remoteControl.ApplyAction("DockingMode_Off");
@@ -303,46 +287,44 @@ namespace LaserComm
                 List<Vector3D> approachPoints = new List<Vector3D>();
                 Vector3D destination = new Vector3D();
 
-                Vector3D orientForward = new Vector3D();
-                Vector3D orientUp = new Vector3D();
+                Vector3D downOrient = new Vector3D();
+                Vector3D fwdOrient = new Vector3D();
 
                 foreach (var pt in location.waypoints)
                 {
                     Echo("Adding point " + pt);
+
                     Vector3D vec;
                     string ptName = convertToVector(pt, out vec);
-                    string ptName2 = ptName.ToLower();
+                    ptName = ptName.ToLower();
 
-                    // Orientation: save as is
-                    if (ptName2.Contains("orientation"))
+                    // Case 1: orientation
+                    if (ptName.Contains("orientation"))
                     {
-                        if (ptName2.Contains("forward"))
+                        if (ptName.Contains("down"))
                         {
-                            orientForward = vec;
+                            downOrient = vec;
                         }
-                        else if (ptName2.Contains("up"))
+                        else if (ptName.Contains("forward"))
                         {
-                            orientUp = vec;
+                            fwdOrient = vec;
                         }
                     }
-                    // Otherwise, it is an actual GPS coordinate
-                    else
-                    {
 
-                        if (ptName2.Contains("approach"))
-                        {
-                            approachPoints.Add(vec);
-                        }
-                        else if (ptName2.Contains("destination"))
-                        {
-                            destination = vec;
-                        }
-                        else if (ptName2.Contains("departure"))
-                        {
-                            departurePoints.Add(vec);
-                        }
+                    else if (ptName.Contains("approach"))
+                    {
+                        approachPoints.Add(vec);
+                    }
+                    else if (ptName.Contains("destination"))
+                    {
+                        destination = vec;
+                    }
+                    else if (ptName.Contains("departure"))
+                    {
+                        departurePoints.Add(vec);
                     }
                 }
+
 
                 if (approachPoints.Count == 0)
                 {
@@ -363,67 +345,28 @@ namespace LaserComm
 
                 remoteControl.ClearWaypoints();
 
+                //Have now reached first approach point: orient
+
+                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
+                {
+                    yield return true;
+                }
+                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                {
+                    yield return true;
+                }
+
+                // We're close, enable docking mode
                 Echo("Enabled docking mode; close to destination");
                 remoteControl.ApplyAction("DockingMode_On");
 
-                bool doneRotating = false;
-
-                while (!doneRotating)
-                {
-                    Echo("Rotating");
-
-                    QuaternionD target = QuaternionD.CreateFromForwardUp(orientForward, orientUp);
-                    QuaternionD current = QuaternionD.CreateFromRotationMatrix(remoteControl.WorldMatrix.GetOrientation());
-                    QuaternionD rotation = target / current;
-                    Vector3D axis;
-                    double angle;
-                    rotation.GetAxisAngle(out axis, out angle);
-
-                    foreach (var gyro in gyros)
-                    {
-                        MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
-                        // Test: divide by 2 to reduce magnitude
-                        Vector3D localAxis = Vector3D.Transform(axis, worldToGyro)/2.0;
-
-                        double value = Math.Log(angle + 1, 2);
-                        if (value < 0.001)
-                        {
-                            localAxis *= 0;
-                            doneRotating = true;
-                        }
-                        else
-                        {
-                            localAxis *= value;
-                        }
-
-                        gyro.SetValueBool("Override", true);
-                        gyro.SetValueFloat("Power", 1f);
-                        gyro.SetValue("Pitch", (float)localAxis.X);
-                        // Yaw and roll used to be negative it seems
-                        gyro.SetValue("Yaw", (float)-localAxis.Y);
-                        gyro.SetValue("Roll", (float)-localAxis.Z);
-                    }
-
-                    if (doneRotating)
-                    {
-                        foreach (var gyro in gyros)
-                        {
-                            gyro.SetValueBool("Override", false);
-                        }
-                    }
-                    timer.ApplyAction("TriggerNow");
-
-                    yield return true;
-
-                }
-                Echo("Done rotating");
-
-                // Calculate offset
+                // Calculate offset now that we are properly rotated
                 Vector3D offset = remoteControl.GetPosition() - connector.GetPosition();
 
+                // Add final approach waypoints, go
                 for (int i = 1; i < approachPoints.Count; i++)
                 {
-                    remoteControl.AddWaypoint(approachPoints[i] + offset, "Final approach");
+                    remoteControl.AddWaypoint(approachPoints[i] + offset, "Final approach " + i.ToString());
                 }
 
                 remoteControl.SetAutoPilotEnabled(true);
@@ -434,62 +377,23 @@ namespace LaserComm
                     yield return true;
                 }
 
+                // We've arrived at the final destination
                 remoteControl.ClearWaypoints();
 
-                doneRotating = false;
-
-                while (!doneRotating)
+                // Orient again
+                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
                 {
-                    Echo("Rotating");
-
-                    QuaternionD target = QuaternionD.CreateFromForwardUp(orientForward, orientUp);
-                    QuaternionD current = QuaternionD.CreateFromRotationMatrix(remoteControl.WorldMatrix.GetOrientation());
-                    QuaternionD rotation = target / current;
-                    Vector3D axis;
-                    double angle;
-                    rotation.GetAxisAngle(out axis, out angle);
-
-                    foreach (var gyro in gyros)
-                    {
-                        MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
-                        Vector3D localAxis = Vector3D.Transform(axis, worldToGyro);
-
-                        double value = Math.Log(angle + 1, 2);
-                        if (value < 0.001)
-                        {
-                            localAxis *= 0;
-                            doneRotating = true;
-                        }
-                        else
-                        {
-                            localAxis *= value;
-                        }
-
-                        gyro.SetValueBool("Override", true);
-                        gyro.SetValueFloat("Power", 1f);
-                        gyro.SetValue("Pitch", (float)localAxis.X);
-                        // Yaw and roll used to be negative it seems
-                        gyro.SetValue("Yaw", (float)localAxis.Y);
-                        gyro.SetValue("Roll", (float)localAxis.Z);
-                    }
-
-                    if (doneRotating)
-                    {
-                        foreach (var gyro in gyros)
-                        {
-                            gyro.SetValueBool("Override", false);
-                        }
-                    }
-                    timer.ApplyAction("TriggerNow");
-
                     yield return true;
-
                 }
-                Echo("Done rotating");
+                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                {
+                    yield return true;
+                }
 
-                // Calculate offset
+                // Re-calculate offset
                 offset = remoteControl.GetPosition() - connector.GetPosition();
 
+                // Add destination point, go
                 remoteControl.AddWaypoint(destination + offset, "Destination");
 
                 remoteControl.SetAutoPilotEnabled(true);
@@ -501,7 +405,7 @@ namespace LaserComm
                 }
 
                 remoteControl.ClearWaypoints();
-                
+
                 remoteControl.ApplyAction("DockingMode_Off");
 
                 Echo("Arrived at destination");
@@ -513,6 +417,55 @@ namespace LaserComm
                 yield return false;
             }
 
+
+        }
+
+
+        private bool rotate(Vector3D destOrient, Vector3D curOrient)
+        {
+            bool doneRotating = false;
+
+            Echo("Rotating");
+
+            // To be sure, we divide by the length of both vectors
+            Vector3D axis = Vector3D.Cross(destOrient, curOrient) / (destOrient.Length() * curOrient.Length());
+            // the Normalize method normalizes the axis and returns the length it had before
+            double angle = Math.Asin(axis.Normalize());
+
+            foreach (var gyro in gyros)
+            {
+                MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
+                Vector3D localAxis = Vector3D.Transform(axis, worldToGyro);
+
+                double value = Math.Log(angle + 1, 2);
+                if (value < 0.0001)
+                {
+                    localAxis *= 0;
+                    doneRotating = true;
+                }
+                else
+                {
+                    localAxis *= value;
+                }
+
+                gyro.SetValueBool("Override", true);
+                gyro.SetValueFloat("Power", 1f);
+                gyro.SetValue("Pitch", (float)-localAxis.X);
+                gyro.SetValue("Yaw", (float)localAxis.Y);
+                gyro.SetValue("Roll", (float)localAxis.Z);
+            }
+
+            if (doneRotating)
+            {
+                foreach (var gyro in gyros)
+                {
+                    gyro.SetValueBool("Override", false);
+                }
+            }
+
+            timer.ApplyAction("TriggerNow");
+
+            return doneRotating;
 
         }
 
@@ -536,16 +489,16 @@ namespace LaserComm
 
                 // Keep processing new messages until we timeout waiting for any more potential responses
                 // This is because we don't know how many locations may send in responses
-                int sec = DateTime.Now.Second;
-                while (DateTime.Now.Second - sec < SECONDS_TO_WAIT_FOR_RESPONSE)
+                long ticks = DateTime.Now.Ticks;
+                while (DateTime.Now.Ticks - ticks < 10000000 * SECONDS_TO_WAIT_FOR_RESPONSE)
                 {
-                    
+
                     // Now check text panel for response
                     while (!messageReceiver.GetPrivateText().Contains("RESPONSE_NAV"))
                     {
-                        
+
                         // timeout
-                        if (DateTime.Now.Second - sec > SECONDS_TO_WAIT_FOR_RESPONSE)
+                        if (DateTime.Now.Ticks - ticks > 10000000 * SECONDS_TO_WAIT_FOR_RESPONSE)
                         {
                             Echo("Timed out waiting for (any more) responses");
                             yield return false;
@@ -676,19 +629,15 @@ namespace LaserComm
         {
             // Final destionation: 2.5m in front of connector
 
-            Vector3D finalPt = connector.GetPosition() + 2.5 * connector.WorldMatrix.GetOrientation().Forward;
+            Vector3D finalPt = connector.GetPosition() + 2.6 * connector.WorldMatrix.GetOrientation().Forward;
             Vector3D finalApproach = DOCK_LEFT ? finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
             Vector3D beginApproach = DOCK_LEFT ? finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
             Vector3D departure = finalPt + DEPARTURE_DIST * connector.WorldMatrix.GetOrientation().Forward;
 
-            //Vector3D orientation = door.WorldMatrix.GetOrientation().Down;
-            MatrixD orient = door.WorldMatrix.GetOrientation();
-            Vector3D forward = DOCK_LEFT ? orient.Left : orient.Right;
-            forward.Normalize();
-            Vector3D up = orient.Up;
-            up.Normalize();
+            Vector3D down = door.WorldMatrix.GetOrientation().Down;
+            Vector3D shipFwd = DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left;
 
-            return new List<string> { convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Forward", forward, '4'), convertToGPS("Orientation Up", up, '4') };
+            return new List<string> { convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
         }
 
         private string parseLaserName(string info)
