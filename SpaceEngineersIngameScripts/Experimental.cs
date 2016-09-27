@@ -24,20 +24,18 @@ namespace Experimental
 
         const string DOCK_NAME = "[DOCK]";
 
-        IMyTimerBlock time;
-
-        MatrixD stationMatrix;
+        IMyLandingGear gear;
 
         public Program()
         {
-            time = GridTerminalSystem.GetBlockWithName("[DOCK] Timer") as IMyTimerBlock;
+            gear = GridTerminalSystem.GetBlockWithName("[DOCK] Landing Gear") as IMyLandingGear;
         }
 
 
 
         public void Main(string args)
         {
-            printPropertiesAndActions(time);
+            printPropertiesAndActions(gear);
         }
 
 

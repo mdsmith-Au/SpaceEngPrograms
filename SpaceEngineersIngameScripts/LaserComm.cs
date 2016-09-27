@@ -28,15 +28,21 @@ namespace LaserComm
         #region constants
         private const string BLOCK_PREFIX = "[DOCK]";
 
-        private const float FINAL_APPROACH_DIST = 100;
+        private const double FINAL_APPROACH_DIST = 100;
 
-        private const float BEGIN_APPROACH_DIST = 200;
+        private const double BEGIN_APPROACH_DIST = 200;
 
-        private const float DEPARTURE_DIST = 200;
+        private const double FINAL_APPROACH_PLANET = 100;
 
-        private const long SECONDS_TO_WAIT_FOR_RESPONSE = 20;
+        private const double DEPARTURE_PLANET = 50;
+
+        private const double DEPARTURE_DIST = 200;
+
+        private const long SECONDS_TO_WAIT_FOR_RESPONSE = 25;
 
         private const long DOCKING_TIME_SECONDS = 20;
+
+        private const double LANDING_GEAR_HEIGHT = 1.0;
 
         #endregion constants
 
@@ -49,8 +55,11 @@ namespace LaserComm
         private IMyTimerBlock timer;
         private IEnumerator<bool> comm;
         private IEnumerator<bool> fly;
+        private IMyLightingBlock landLight;
+        private int mainGear;
 
         private List<IMyGyro> gyros = new List<IMyGyro>();
+        private List<IMyLandingGear> gears = new List<IMyLandingGear>();
 
         private bool all_blocks_found;
         private int num_blocks_found;
@@ -59,6 +68,7 @@ namespace LaserComm
 
         private bool IS_BASE;
         private bool DOCK_LEFT;
+        private bool IS_PLANET;
 
         private struct Destination
         {
@@ -86,9 +96,23 @@ namespace LaserComm
 
             autopilot_en = true;
 
-            IS_BASE = Me.CustomName.Contains("[BASE]") ? true : false;
+            string parse = Me.CustomName.Replace(BLOCK_PREFIX, "");
+            int id1 = Me.CustomName.IndexOf('[');
+            int id2 = Me.CustomName.IndexOf(']');
+            if (id1 > 0 && id2 > 0)
+            {
+                parse = parse.Substring(id1, id2 - id1);
+            }
+            else
+            {
+                parse = "";
+            }
 
-            DOCK_LEFT = Me.CustomName.Contains("[LEFT]") ? true : false;
+            IS_BASE = parse.Contains("BASE");
+
+            DOCK_LEFT = Me.CustomName.Contains("LEFT");
+
+            IS_PLANET = Me.CustomName.Contains("PLANET");
 
             debugPanel = null;
             messageReceiver = null;
@@ -97,6 +121,8 @@ namespace LaserComm
             remoteControl = null;
             door = null;
             timer = null;
+            landLight = null;
+            mainGear = 0;
 
             List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
             GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks, hasPrefix);
@@ -104,6 +130,7 @@ namespace LaserComm
 
             gyros.Clear();
             destinations.Clear();
+            gears.Clear();
 
             foreach (var blk in blks)
             {
@@ -119,11 +146,11 @@ namespace LaserComm
                 {
                     remoteControl = blk as IMyRemoteControl;
                 }
-                else if (blk is IMyShipConnector)
+                else if (!IS_PLANET && blk is IMyShipConnector)
                 {
                     connector = blk as IMyShipConnector;
                 }
-                else if (blk is IMyDoor)
+                else if (!IS_PLANET && blk is IMyDoor)
                 {
                     door = blk as IMyDoor;
                 }
@@ -137,6 +164,19 @@ namespace LaserComm
                 {
                     timer = blk as IMyTimerBlock;
                     timer.SetValueFloat("TriggerDelay", 1.0f);
+                }
+                else if (IS_BASE && IS_PLANET && blk is IMyLightingBlock)
+                {
+                    landLight = blk as IMyLightingBlock;
+                }
+                else if (!IS_BASE && blk is IMyLandingGear)
+                {
+                    IMyLandingGear gear = blk as IMyLandingGear;
+                    gears.Add(gear);
+                    if (gear.CustomName.ToLower().Contains("main"))
+                    {
+                        mainGear = gears.Count - 1;
+                    }
                 }
             }
 
@@ -170,7 +210,7 @@ namespace LaserComm
                 all_blocks_found = false;
             }
 
-            if (connector == null)
+            if (!IS_PLANET && connector == null)
             {
                 Echo("Can't find any connectors to use for docking");
                 all_blocks_found = false;
@@ -182,7 +222,7 @@ namespace LaserComm
                 all_blocks_found = false;
             }
 
-            if (door == null)
+            if (!IS_PLANET && door == null)
             {
                 Echo("Can't find door");
                 all_blocks_found = false;
@@ -198,6 +238,15 @@ namespace LaserComm
             {
                 Echo("No timer found");
                 all_blocks_found = false;
+            }
+            if (IS_PLANET && landLight == null)
+            {
+                Echo("No light for landing ships found");
+                all_blocks_found = false;
+            }
+            if (!IS_BASE && gears.Count == 0)
+            {
+                Echo("Warning: no landing gear found.  You will not be able to land on planets");
             }
 
             comm = communicate().GetEnumerator();
@@ -316,207 +365,382 @@ namespace LaserComm
                 List<Vector3D> approachPoints = new List<Vector3D>();
                 Vector3D destination = new Vector3D();
 
-                Vector3D downOrient = new Vector3D();
-                Vector3D fwdOrient = new Vector3D();
-
-                // Go through list of received points
-                foreach (var pt in location.waypoints)
+                if (location.name.ToLower().Contains("planet"))
                 {
-                    Echo("Adding point " + pt);
-
-                    // Interpret GPS points
-                    Vector3D vec;
-                    string ptName = convertToVector(pt, out vec);
-                    ptName = ptName.ToLower();
-
-                    // Case 1: orientation
-                    if (ptName.Contains("orientation"))
+                    #region PLANET_AUTOPILOT
+                    // Check landing gear existence
+                    if (gears.Count == 0)
                     {
-                        if (ptName.Contains("down"))
+                        Echo("Error: can't go to a planet without landing gear");
+                        Echo("Skipping destination");
+                        // Pause
+                        for (int i = 0; i < 10; i++)
                         {
-                            downOrient = vec;
+                            yield return true;
                         }
-                        else if (ptName.Contains("forward"))
+                        continue;
+                    }
+
+                    Vector3D fwdOrient = new Vector3D();
+
+                    // Go through list of received points
+                    foreach (var pt in location.waypoints)
+                    {
+                        Echo("Adding point " + pt);
+
+                        // Interpret GPS points
+                        Vector3D vec;
+                        string ptName = convertToVector(pt, out vec);
+                        ptName = ptName.ToLower();
+
+                        // Case 1: orientation: Up for base = forward for us
+                        if (ptName.Contains("orientation") && ptName.Contains("up"))
                         {
                             fwdOrient = vec;
                         }
+
+                        // Other cases
+                        else if (ptName.Contains("approach"))
+                        {
+                            approachPoints.Add(vec);
+                        }
+                        else if (ptName.Contains("destination"))
+                        {
+                            destination = vec;
+                        }
+                        else if (ptName.Contains("departure"))
+                        {
+                            departurePoints.Add(vec);
+                        }
                     }
 
-                    // Other cases
-                    else if (ptName.Contains("approach"))
+
+                    if (approachPoints.Count == 0)
                     {
-                        approachPoints.Add(vec);
+                        Echo("Error: no approach points");
+                        yield return false;
                     }
-                    else if (ptName.Contains("destination"))
-                    {
-                        destination = vec;
-                    }
-                    else if (ptName.Contains("departure"))
-                    {
-                        departurePoints.Add(vec);
-                    }
-                }
 
+                    remoteControl.AddWaypoint(approachPoints[0], "Approach");
 
-                if (approachPoints.Count == 0)
-                {
-                    Echo("Error: no approach points");
-                    yield return false;
-                }
+                    Echo("Approach set; enabling autopilot");
 
-                remoteControl.AddWaypoint(approachPoints[0], "Approach 1");
+                    remoteControl.SetAutoPilotEnabled(true);
 
-                Echo("Approach set; enabling autopilot");
-
-                remoteControl.SetAutoPilotEnabled(true);
-
-                while (remoteControl.IsAutoPilotEnabled)
-                {
-                    yield return true;
-                }
-
-                remoteControl.ClearWaypoints();
-
-                //Have now reached first approach point: orient
-
-                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
-                {
-                    yield return true;
-                }
-                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
-                {
-                    yield return true;
-                }
-
-                // We're close, enable docking mode
-                Echo("Enabled docking mode; close to destination");
-                remoteControl.ApplyAction("DockingMode_On");
-                //remoteControl.ApplyAction("CollisionAvoidance_Off");
-
-                // Calculate offset now that we are properly rotated
-                Vector3D offset = remoteControl.GetPosition() - connector.GetPosition();
-
-                // Add final approach waypoints, go
-                for (int i = 1; i < approachPoints.Count; i++)
-                {
-                    remoteControl.AddWaypoint(approachPoints[i] + offset, "Final approach " + i.ToString());
-                }
-
-                remoteControl.SetAutoPilotEnabled(true);
-
-                // Wait for autopilot to arrive
-                while (remoteControl.IsAutoPilotEnabled)
-                {
-                    yield return true;
-                }
-
-                // We've arrived at the final destination
-                remoteControl.ClearWaypoints();
-
-                // Orient again
-                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
-                {
-                    yield return true;
-                }
-                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
-                {
-                    yield return true;
-                }
-
-                // Re-calculate offset
-                offset = remoteControl.GetPosition() - connector.GetPosition();
-
-                // Add destination point, go
-                remoteControl.AddWaypoint(destination + offset, "Destination");
-
-                remoteControl.SetAutoPilotEnabled(true);
-
-                // Wait for autopilot to arrive
-                while (remoteControl.IsAutoPilotEnabled)
-                {
-                    // If connector becomes connected, disable autopilot
-                    if (connector.IsConnected)
-                    {
-                        remoteControl.SetAutoPilotEnabled(false);
-                    }
-                    else
+                    while (remoteControl.IsAutoPilotEnabled)
                     {
                         yield return true;
                     }
 
-                }
+                    remoteControl.ClearWaypoints();
 
-                remoteControl.ClearWaypoints();
+                    // We're close, enable docking mode
+                    Echo("Enabled docking mode; close to destination");
+                    remoteControl.ApplyAction("DockingMode_On");
 
-                remoteControl.ApplyAction("DockingMode_Off");
+                    // Add final approach waypoints, go
+                    for (int i = 1; i < approachPoints.Count; i++)
+                    {
+                        remoteControl.AddWaypoint(approachPoints[i], "Final approach " + i.ToString());
+                    }
 
-                // We're here, do a final orientation to make sure connector lines up if we're not already connected
-                while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
-                {
-                    // If connector becomes connected, stop
-                    if (connector.IsConnected)
-                    {
-                        resetGyros();
-                        break;
-                    }
-                    else
-                    {
-                        yield return true;
-                    }
-                }
-                while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
-                {
-                    // If connector becomes connected, stop
-                    if (connector.IsConnected)
-                    {
-                        resetGyros();
-                        break;
-                    }
-                    else
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    // Wait for autopilot to arrive
+                    while (remoteControl.IsAutoPilotEnabled)
                     {
                         yield return true;
                     }
-                }
 
-                Echo("Arrived at destination");
+                    Echo("Arrived at final approach");
+                    // We've arrived at the final approach point
+                    remoteControl.ClearWaypoints();
 
-                connector.ApplyAction("Lock");
+                    // Calculate basic remote control -> landing gear offset
+                    Vector3D offset = remoteControl.GetPosition() - gears[mainGear].GetPosition();
+                    // Take into consideration the fact that the landing gear is big
+                    Vector3D grav = remoteControl.GetNaturalGravity();
+                    grav.Normalize();
+                    offset += grav * LANDING_GEAR_HEIGHT;
 
-                // Wait certain amount of time before undocking
-                long startTick = DateTime.Now.Ticks;
+                    // Add destination point + offset to account for remote control positioning
+                    remoteControl.AddWaypoint(destination + offset, "Destination");
 
-                while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
-                {
-                    Echo("Waiting to undock");
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    // Wait for autopilot to arrive
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        yield return true;
+                    }
+
+                    remoteControl.ApplyAction("DockingMode_Off");
+                    remoteControl.ClearWaypoints();
+
+                    // We're here, do a final orientation
+                    while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                    {
+                        yield return true;
+                    }
+
+                    Echo("Arrived at destination");
+
+                    foreach (var g in gears)
+                    {
+                        g.ApplyAction("Lock");
+                    }
+
+                    // Wait certain amount of time before undocking
+                    long startTick = DateTime.Now.Ticks;
+
+                    while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
+                    {
+                        Echo("Waiting to leave");
+                        yield return true;
+                    }
+
+                    // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
+
+                    offset = (remoteControl.GetPosition() - gears[mainGear].GetPosition()) + grav * LANDING_GEAR_HEIGHT;
+
+                    Echo("Adding departure points");
+
+                    for (int i = 0; i < departurePoints.Count; i++)
+                    {
+                        remoteControl.AddWaypoint(departurePoints[i] + offset, "Departure " + (i + 1).ToString());
+                    }
+
+                    Echo("Unlocking gears");
+
+                    foreach (var g in gears)
+                    {
+                        g.ApplyAction("Unlock");
+                    }
+
+                    Echo("Autopilot enabled");
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    // Wait a bit for the autopilot to take, otherwise it goes haywire
                     yield return true;
+
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        yield return true;
+                    }
+
+                    // We've departed; clear waypoints
+                    remoteControl.ClearWaypoints();
+                    #endregion
                 }
-
-                // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
-
-                offset = remoteControl.GetPosition() - connector.GetPosition();
-
-                connector.ApplyAction("Unlock");
-
-                for (int i = 0; i < departurePoints.Count; i++)
+                else
                 {
-                    remoteControl.AddWaypoint(departurePoints[i] + offset, "Departure " + (i + 1).ToString());
+                    #region NORMAL_AUTOPILOT
+                    Vector3D downOrient = new Vector3D();
+                    Vector3D fwdOrient = new Vector3D();
+
+                    // Go through list of received points
+                    foreach (var pt in location.waypoints)
+                    {
+                        Echo("Adding point " + pt);
+
+                        // Interpret GPS points
+                        Vector3D vec;
+                        string ptName = convertToVector(pt, out vec);
+                        ptName = ptName.ToLower();
+
+                        // Case 1: orientation
+                        if (ptName.Contains("orientation"))
+                        {
+                            if (ptName.Contains("down"))
+                            {
+                                downOrient = vec;
+                            }
+                            else if (ptName.Contains("forward"))
+                            {
+                                fwdOrient = vec;
+                            }
+                        }
+
+                        // Other cases
+                        else if (ptName.Contains("approach"))
+                        {
+                            approachPoints.Add(vec);
+                        }
+                        else if (ptName.Contains("destination"))
+                        {
+                            destination = vec;
+                        }
+                        else if (ptName.Contains("departure"))
+                        {
+                            departurePoints.Add(vec);
+                        }
+                    }
+
+
+                    if (approachPoints.Count == 0)
+                    {
+                        Echo("Error: no approach points");
+                        yield return false;
+                    }
+
+                    remoteControl.AddWaypoint(approachPoints[0], "Approach 1");
+
+                    Echo("Approach set; enabling autopilot");
+
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        yield return true;
+                    }
+
+                    remoteControl.ClearWaypoints();
+
+                    //Have now reached first approach point: orient
+
+                    while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
+                    {
+                        yield return true;
+                    }
+                    while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                    {
+                        yield return true;
+                    }
+
+                    // We're close, enable docking mode
+                    Echo("Enabled docking mode; close to destination");
+                    remoteControl.ApplyAction("DockingMode_On");
+                    //remoteControl.ApplyAction("CollisionAvoidance_Off");
+
+                    // Calculate offset now that we are properly rotated
+                    Vector3D offset = remoteControl.GetPosition() - connector.GetPosition();
+
+                    // Add final approach waypoints, go
+                    for (int i = 1; i < approachPoints.Count; i++)
+                    {
+                        remoteControl.AddWaypoint(approachPoints[i] + offset, "Final approach " + i.ToString());
+                    }
+
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    // Wait for autopilot to arrive
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        yield return true;
+                    }
+
+                    // We've arrived at the final destination
+                    remoteControl.ClearWaypoints();
+
+                    // Orient again
+                    while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
+                    {
+                        yield return true;
+                    }
+                    while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                    {
+                        yield return true;
+                    }
+
+                    // Re-calculate offset
+                    offset = remoteControl.GetPosition() - connector.GetPosition();
+
+                    // Add destination point, go
+                    remoteControl.AddWaypoint(destination + offset, "Destination");
+
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    // Wait for autopilot to arrive
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        // If connector becomes connected, disable autopilot
+                        if (connector.IsConnected)
+                        {
+                            remoteControl.SetAutoPilotEnabled(false);
+                        }
+                        else
+                        {
+                            yield return true;
+                        }
+
+                    }
+
+                    remoteControl.ClearWaypoints();
+
+                    remoteControl.ApplyAction("DockingMode_Off");
+
+                    // We're here, do a final orientation to make sure connector lines up if we're not already connected
+                    while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
+                    {
+                        // If connector becomes connected, stop
+                        if (connector.IsConnected)
+                        {
+                            resetGyros();
+                            break;
+                        }
+                        else
+                        {
+                            yield return true;
+                        }
+                    }
+                    while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
+                    {
+                        // If connector becomes connected, stop
+                        if (connector.IsConnected)
+                        {
+                            resetGyros();
+                            break;
+                        }
+                        else
+                        {
+                            yield return true;
+                        }
+                    }
+
+                    Echo("Arrived at destination");
+
+                    connector.ApplyAction("Lock");
+
+                    // Wait certain amount of time before undocking
+                    long startTick = DateTime.Now.Ticks;
+
+                    while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
+                    {
+                        Echo("Waiting to undock");
+                        yield return true;
+                    }
+
+                    // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
+
+                    offset = remoteControl.GetPosition() - connector.GetPosition();
+
+                    connector.ApplyAction("Unlock");
+
+                    for (int i = 0; i < departurePoints.Count; i++)
+                    {
+                        remoteControl.AddWaypoint(departurePoints[i] + offset, "Departure " + (i + 1).ToString());
+                    }
+
+                    remoteControl.SetAutoPilotEnabled(true);
+
+                    while (remoteControl.IsAutoPilotEnabled)
+                    {
+                        yield return true;
+                    }
+
+                    // We've departed; clear waypoints and renable collision avoidance
+                    remoteControl.ClearWaypoints();
+                    //remoteControl.ApplyAction("CollisionAvoidance_On");
+
+                    #endregion
                 }
 
-                remoteControl.SetAutoPilotEnabled(true);
 
-                while (remoteControl.IsAutoPilotEnabled)
-                {
-                    yield return true;
-                }
-
-                // We've departed; clear waypoints and renable collision avoidance
-                remoteControl.ClearWaypoints();
-                //remoteControl.ApplyAction("CollisionAvoidance_On");
 
             }
 
-            yield return false;
             autopilot_en = false;
+            yield return false;
 
             #endregion
         }
@@ -590,7 +814,7 @@ namespace LaserComm
 
                 // Try sending message until PB accepts execution
                 Echo("Sending NAV request");
-                if (!WANProgram.TryRun("SEND 5 NAV - B REQUEST_NAV"))
+                if (!WANProgram.TryRun("SEND 2 NAV - B REQUEST_NAV"))
                 {
                     Echo("Error sending message");
                     yield return false;
@@ -631,12 +855,27 @@ namespace LaserComm
                         string[] responseSplit = resp.Split('|');
 
                         List<string> wpts = new List<string>();
-                        for (int i = 1; i < responseSplit.Length; i++)
+                        for (int i = 2; i < responseSplit.Length; i++)
                         {
                             wpts.Add(responseSplit[i]);
                         }
 
-                        destinations.Add(new Destination(wpts, "NAME_HERE"));
+                        Destination dest = new Destination(wpts, responseSplit[1]);
+                        bool exists = false;
+
+                        foreach (var d in destinations)
+                        {
+                            if (d.name.Equals(dest.name))
+                            {
+                                exists = true;
+                            }
+                        }
+
+                        if (!exists)
+                        {
+                            destinations.Add(dest);
+                        }
+
                     }
 
                     yield return true;
@@ -671,7 +910,7 @@ namespace LaserComm
                     response += ';';
 
                     // Send response
-                    if (!WANProgram.TryRun("SEND 5 NAV - B " + response))
+                    if (!WANProgram.TryRun("SEND 2 NAV - B " + response))
                     {
                         yield return false;
                     }
@@ -736,22 +975,42 @@ namespace LaserComm
 
         private List<string> getWaypoints()
         {
-            // Final destionation: 2.5m in front of connector
-            // Add +0.1 so that we don't hit connector itself
 
-            // Set final point in front of connector
-            Vector3D finalPt = connector.GetPosition() + 2.6 * connector.WorldMatrix.GetOrientation().Forward;
-            // Add a small offset to that the autopilot will try and go slightly past the connector
-            finalPt += 0.2 * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
+            if (!IS_PLANET)
+            {
+                #region SPACE_WAYPOiNTS
+                // Final destionation: 2.5m in front of connector
+                // Add +0.1 so that we don't hit connector itself
 
-            Vector3D finalApproach = DOCK_LEFT ? finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
-            Vector3D beginApproach = DOCK_LEFT ? finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
-            Vector3D departure = finalPt + DEPARTURE_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
+                // Set final point in front of connector
+                Vector3D finalPt = connector.GetPosition() + 2.6 * connector.WorldMatrix.GetOrientation().Forward;
+                // Add a small offset to that the autopilot will try and go slightly past the connector
+                finalPt += 0.2 * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
 
-            Vector3D down = door.WorldMatrix.GetOrientation().Down;
-            Vector3D shipFwd = DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left;
+                Vector3D finalApproach = DOCK_LEFT ? finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
+                Vector3D beginApproach = DOCK_LEFT ? finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
+                Vector3D departure = finalPt + DEPARTURE_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
 
-            return new List<string> { convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
+                Vector3D down = door.WorldMatrix.GetOrientation().Down;
+                Vector3D shipFwd = DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left;
+
+                return new List<string> { "Space " + Runtime.LastRunTimeMs.ToString(), convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
+                #endregion
+            }
+            else
+            {
+                #region PLANET_WAYPOINTS
+                Vector3D finalPt = landLight.GetPosition() + 2.6 * landLight.WorldMatrix.GetOrientation().Forward;
+
+                Vector3D approach = finalPt + FINAL_APPROACH_PLANET * landLight.WorldMatrix.GetOrientation().Forward + FINAL_APPROACH_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
+                Vector3D departure = finalPt + DEPARTURE_PLANET * landLight.WorldMatrix.GetOrientation().Forward + DEPARTURE_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
+
+                Vector3D upOrient = landLight.WorldMatrix.GetOrientation().Up;
+                // Note: departure = approach
+                return new List<string> { "Planet " + Runtime.LastRunTimeMs.ToString(), convertToGPS("Approach", approach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Up", upOrient, '4') };
+                #endregion
+            }
+
         }
 
         //=======================================================================
