@@ -44,9 +44,12 @@ namespace LaserComm
 
         private const double LANDING_GEAR_HEIGHT = 1.0;
 
+        private const double CONNECTOR_DIST = 2.6;
+
         #endregion constants
 
-        private IMyTextPanel debugPanel;
+        // Various blocks
+        private IMyTextPanel lcdPanel;
         IMyTextPanel messageReceiver;
         private IMyProgrammableBlock WANProgram;
         private IMyShipConnector connector;
@@ -61,14 +64,21 @@ namespace LaserComm
         private List<IMyGyro> gyros = new List<IMyGyro>();
         private List<IMyLandingGear> gears = new List<IMyLandingGear>();
 
+
+        // Track potential new blocks, autopilot status, ship/station/planet
         private bool all_blocks_found;
         private int num_blocks_found;
 
         private bool autopilot_en;
 
+        //string location_name;
+
         private bool IS_BASE;
         private bool DOCK_LEFT;
         private bool IS_PLANET;
+
+        // For spinner
+        int counter;
 
         private struct Destination
         {
@@ -96,6 +106,11 @@ namespace LaserComm
 
             autopilot_en = true;
 
+            //location_name = "UNKNOWN";
+
+            // For spinner
+            counter = 0;
+
             string parse = Me.CustomName.Replace(BLOCK_PREFIX, "");
             int id1 = Me.CustomName.IndexOf('[');
             int id2 = Me.CustomName.IndexOf(']');
@@ -110,11 +125,20 @@ namespace LaserComm
 
             IS_BASE = parse.Contains("BASE");
 
-            DOCK_LEFT = Me.CustomName.Contains("LEFT");
+            DOCK_LEFT = parse.Contains("LEFT");
 
-            IS_PLANET = Me.CustomName.Contains("PLANET");
+            IS_PLANET = parse.Contains("PLANET");
 
-            debugPanel = null;
+            if (IS_PLANET) IS_BASE = true;
+
+            //int name_idx = parse.IndexOf("Name:");
+            //if (name_idx > 0)
+            //{
+            //    location_name = parse.Substring(name_idx).Split(:)
+            //}
+
+            // Set all known blocks to null or clear lists
+            lcdPanel = null;
             messageReceiver = null;
             WANProgram = null;
             connector = null;
@@ -124,51 +148,67 @@ namespace LaserComm
             landLight = null;
             mainGear = 0;
 
-            List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
-            GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks, hasPrefix);
-            num_blocks_found = blks.Count;
-
             gyros.Clear();
             destinations.Clear();
             gears.Clear();
 
+            // Get all blocks
+            List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
+            GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks, hasPrefix);
+            num_blocks_found = blks.Count;
+
+
+            // Assign blocks to variables as appropriate
             foreach (var blk in blks)
             {
+                // LCD panel for printing
                 if (blk is IMyTextPanel)
                 {
-                    debugPanel = blk as IMyTextPanel;
+                    lcdPanel = blk as IMyTextPanel;
                 }
+                // Wico Area Network programmable block
                 else if (blk is IMyProgrammableBlock && !blk.Equals(Me))
                 {
                     WANProgram = blk as IMyProgrammableBlock;
                 }
+                // Autopilot
                 else if (!IS_BASE && blk is IMyRemoteControl)
                 {
                     remoteControl = blk as IMyRemoteControl;
                 }
+                /* Ship or station connector for docking
+                 * Used to connect to station and for orientation info
+                 */
                 else if (!IS_PLANET && blk is IMyShipConnector)
                 {
                     connector = blk as IMyShipConnector;
                 }
+                /* Door used for docking; used for orientation information
+                 * since it's more obvious which way a door faces than a connector
+                 */
                 else if (!IS_PLANET && blk is IMyDoor)
                 {
                     door = blk as IMyDoor;
                 }
+                // Gyros for ship orientation
                 else if (!IS_BASE && blk is IMyGyro)
                 {
                     IMyGyro g = blk as IMyGyro;
                     gyros.Add(g);
 
                 }
+                // Timer block so that we can orient ship properly - requires multiple calls/sec
                 else if (!IS_BASE && blk is IMyTimerBlock)
                 {
                     timer = blk as IMyTimerBlock;
                     timer.SetValueFloat("TriggerDelay", 1.0f);
                 }
+                // Light (interior or spotlight) determines where we will land
                 else if (IS_BASE && IS_PLANET && blk is IMyLightingBlock)
                 {
                     landLight = blk as IMyLightingBlock;
                 }
+                // Landing gear....
                 else if (!IS_BASE && blk is IMyLandingGear)
                 {
                     IMyLandingGear gear = blk as IMyLandingGear;
@@ -183,12 +223,15 @@ namespace LaserComm
             // Make sure all gyros reset
             resetGyros();
 
+            // Clear block list
             blks.Clear();
+
+            // Get text panel blocks used by Wico Area Network for communication
             GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(blks, hasWANRPrefix);
 
             if (blks.Count == 0)
             {
-                Echo("Can't find message received text panel for Wico Area Network");
+                Echo("Error: Can't find message received text panel for Wico Area Network");
                 all_blocks_found = false;
             }
             else
@@ -200,48 +243,48 @@ namespace LaserComm
 
             if (WANProgram == null)
             {
-                Echo("Can't find programming block for Wico Area Network");
+                Echo("Error: Can't find programming block for Wico Area Network");
                 all_blocks_found = false;
             }
 
-            if (debugPanel == null)
+            if (lcdPanel == null)
             {
-                Echo("Expect 1 debug LCD");
+                Echo("Error: Expect 1 LCD");
                 all_blocks_found = false;
             }
 
             if (!IS_PLANET && connector == null)
             {
-                Echo("Can't find any connectors to use for docking");
+                Echo("Error: Can't find any connectors to use for docking");
                 all_blocks_found = false;
             }
 
             if (!IS_BASE && remoteControl == null)
             {
-                Echo("Can't find any remote control blocks");
+                Echo("Error: Can't find any remote control blocks");
                 all_blocks_found = false;
             }
 
             if (!IS_PLANET && door == null)
             {
-                Echo("Can't find door");
+                Echo("Error: Can't find door");
                 all_blocks_found = false;
             }
 
             if (!IS_BASE && gyros.Count == 0)
             {
-                Echo("No gyros detected");
+                Echo("Error: No gyros detected");
                 all_blocks_found = false;
             }
 
             if (!IS_BASE && timer == null)
             {
-                Echo("No timer found");
+                Echo("Error: No timer found");
                 all_blocks_found = false;
             }
             if (IS_PLANET && landLight == null)
             {
-                Echo("No light for landing ships found");
+                Echo("Error: No light for landing ship destination found");
                 all_blocks_found = false;
             }
             if (!IS_BASE && gears.Count == 0)
@@ -249,7 +292,10 @@ namespace LaserComm
                 Echo("Warning: no landing gear found.  You will not be able to land on planets");
             }
 
+            // Init communicator state machine
             comm = communicate().GetEnumerator();
+
+            // Clear autopilot state machine
             fly = null;
             #endregion
         }
@@ -257,14 +303,17 @@ namespace LaserComm
         public void Main(string args)
         {
             #region autoGridBlockAdd
+            // Scan for any new blocks on any run
             List<IMyTerminalBlock> blks = new List<IMyTerminalBlock>();
             GridTerminalSystem.SearchBlocksOfName(BLOCK_PREFIX, blks);
+
+            // However, don't add any new blocks if the connector is connected otherwise we'll get stuff from the connected ship/station
             bool connLock = false;
             try
             {
                 connLock = connector.IsLocked;
             }
-            // Do nothing for catch
+
             catch { }
 
             if (!connLock && (!all_blocks_found || blks.Count != num_blocks_found))
@@ -274,7 +323,7 @@ namespace LaserComm
 
             #endregion
 
-            // Run state machine
+            // Run communicator state machine
             if (comm != null)
             {
                 if (!comm.MoveNext() || !comm.Current)
@@ -286,10 +335,12 @@ namespace LaserComm
                     if (IS_BASE)
                     {
                         Echo("Running base...");
+                        Turn();
                     }
                     else
                     {
-                        Echo("Running ship...");
+                        Echo("Running ship: communication...");
+                        Turn();
                     }
                     return;
                 }
@@ -307,18 +358,27 @@ namespace LaserComm
             }
 
             #region debugPanelWrite
-            debugPanel.WritePublicText("Destinations:\n");
+            lcdPanel.WritePublicText("Destinations:\n");
 
             foreach (var dst in destinations)
             {
-                debugPanel.WritePublicText("Name: " + dst.name + "\n", true);
-                debugPanel.WritePublicText("Locations:\n", true);
+                lcdPanel.WritePublicText("Name: " + dst.name + "\n", true);
+                lcdPanel.WritePublicText("Locations:\n", true);
                 foreach (var pt in dst.waypoints)
                 {
-                    debugPanel.WritePublicText(pt + "\n", true);
+                    lcdPanel.WritePublicText(pt + "\n", true);
                 }
             }
             #endregion
+
+            if (args.Contains("STOP"))
+            {
+                autopilot_en = false;
+            }
+            else if (args.Contains("START"))
+            {
+                autopilot_en = true;
+            }
 
             // Create autopilot instance if appropriate
             if (!IS_BASE && comm == null && fly == null && autopilot_en && destinations.Count > 0)
@@ -335,12 +395,13 @@ namespace LaserComm
                 }
                 else
                 {
-                    Echo("Autopilot running...");
+                    Echo("Running ship: autopilot...");
+                    Turn();
                     return;
                 }
             }
 
-            Echo("DONE!");
+
         }
 
         public IEnumerable<bool> autopilot()
@@ -516,6 +577,15 @@ namespace LaserComm
                     {
                         g.ApplyAction("Unlock");
                     }
+
+                    // Cheap way of waiting 2 seconds for docking stuff to retract
+                    for (int k = 0; k < 2; k++)
+                    {
+                        yield return true;
+                    }
+                    
+
+                    
 
                     Echo("Autopilot enabled");
                     remoteControl.SetAutoPilotEnabled(true);
@@ -735,11 +805,8 @@ namespace LaserComm
                     #endregion
                 }
 
-
-
             }
 
-            autopilot_en = false;
             yield return false;
 
             #endregion
@@ -763,6 +830,7 @@ namespace LaserComm
                 MatrixD worldToGyro = MatrixD.Invert(gyro.WorldMatrix.GetOrientation());
                 Vector3D localAxis = Vector3D.Transform(axis, worldToGyro);
 
+                // Stop if we reached threshold
                 double value = Math.Log(angle + 1, 2);
                 if (value < 0.0001)
                 {
@@ -793,6 +861,7 @@ namespace LaserComm
 
         }
 
+        // Set override on all gyros to off
         private void resetGyros()
         {
             foreach (var gyro in gyros)
@@ -802,6 +871,7 @@ namespace LaserComm
             }
         }
 
+        // Communication state machine
         public IEnumerable<bool> communicate()
         {
             // If we're a ship, send out requests for nav data
@@ -1000,7 +1070,7 @@ namespace LaserComm
             else
             {
                 #region PLANET_WAYPOINTS
-                Vector3D finalPt = landLight.GetPosition() + 2.6 * landLight.WorldMatrix.GetOrientation().Forward;
+                Vector3D finalPt = landLight.GetPosition() + CONNECTOR_DIST * landLight.WorldMatrix.GetOrientation().Forward;
 
                 Vector3D approach = finalPt + FINAL_APPROACH_PLANET * landLight.WorldMatrix.GetOrientation().Forward + FINAL_APPROACH_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
                 Vector3D departure = finalPt + DEPARTURE_PLANET * landLight.WorldMatrix.GetOrientation().Forward + DEPARTURE_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
@@ -1013,8 +1083,22 @@ namespace LaserComm
 
         }
 
+        // Spinner from http://stackoverflow.com/a/1925137
+        public void Turn()
+        {
+            counter++;
+            switch (counter % 4)
+            {
+                case 0: Echo("/"); break;
+                case 1: Echo("-"); break;
+                case 2: Echo("\\"); break;
+                case 3: Echo("|"); break;
+            }
+        }
+
         //=======================================================================
         //////////////////////////END////////////////////////////////////////////
         //=======================================================================
+
     }
 }
