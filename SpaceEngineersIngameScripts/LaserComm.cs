@@ -34,15 +34,15 @@ namespace LaserComm
 
         private const double FINAL_APPROACH_PLANET = 100;
 
-        private const double DEPARTURE_PLANET = 50;
+        private const double DEPARTURE_PLANET = 100;
 
         private const double DEPARTURE_DIST = 200;
 
-        private const long SECONDS_TO_WAIT_FOR_RESPONSE = 25;
+        private const int SECONDS_TO_WAIT_FOR_RESPONSE = 25;
 
-        private const long DOCKING_TIME_SECONDS = 20;
+        private const int DOCKING_TIME_SECONDS = 20;
 
-        private const double LANDING_GEAR_HEIGHT = 1.0;
+        private const double LANDING_GEAR_HEIGHT = -1.6;
 
         private const double CONNECTOR_DIST = 2.6;
 
@@ -58,7 +58,7 @@ namespace LaserComm
         private IMyTimerBlock timer;
         private IEnumerator<bool> comm;
         private IEnumerator<bool> fly;
-        private IMyLightingBlock landLight;
+        private IMyInteriorLight landLight;
         private int mainGear;
 
         private List<IMyGyro> gyros = new List<IMyGyro>();
@@ -71,11 +71,15 @@ namespace LaserComm
 
         private bool autopilot_en;
 
-        //string location_name;
+        private string location_name;
 
         private bool IS_BASE;
         private bool DOCK_LEFT;
         private bool IS_PLANET;
+
+        private string oldPBName;
+
+        private int unique_id;
 
         // For spinner
         int counter;
@@ -84,11 +88,37 @@ namespace LaserComm
         {
             public List<string> waypoints;
             public string name;
+            public string unique_id;
+            public bool is_planet;
 
-            public Destination(List<string> _waypoints, string _name)
+            public Destination(List<string> _waypoints, string _name, string _unique_id, string _type)
             {
                 name = _name;
                 waypoints = _waypoints;
+                unique_id = _unique_id;
+
+                is_planet = _type.ToLower().Contains("planet");
+
+            }
+
+            // override object.Equals
+            public override bool Equals(object obj)
+            {
+
+                if (obj == null || !(obj is Destination))
+                {
+                    return false;
+                }
+
+                Destination dcast = (Destination)obj;
+
+                return dcast.unique_id.Equals(unique_id);
+            }
+
+            // override object.GetHashCode
+            public override int GetHashCode()
+            {
+                return unique_id.GetHashCode();
             }
         }
 
@@ -102,11 +132,16 @@ namespace LaserComm
         private void init()
         {
             #region initialization
+
+            oldPBName = Me.CustomName;
+
+            unique_id = (new Random()).Next();
+
             all_blocks_found = true;
 
             autopilot_en = true;
 
-            //location_name = "UNKNOWN";
+            location_name = "UNKNOWN";
 
             // For spinner
             counter = 0;
@@ -114,28 +149,31 @@ namespace LaserComm
             string parse = Me.CustomName.Replace(BLOCK_PREFIX, "");
             int id1 = Me.CustomName.IndexOf('[');
             int id2 = Me.CustomName.IndexOf(']');
-            if (id1 > 0 && id2 > 0)
+            if (id1 >= 0 && id2 >= 0)
             {
-                parse = parse.Substring(id1, id2 - id1);
+                parse = parse.Substring(id1 + 1, id2 - id1 - 1);
             }
             else
             {
                 parse = "";
             }
 
-            IS_BASE = parse.Contains("BASE");
+            BaconArgs Args = BaconArgs.parse(parse);
 
-            DOCK_LEFT = parse.Contains("LEFT");
+            IS_BASE = (Args.getFlag('b') > 0);
 
-            IS_PLANET = parse.Contains("PLANET");
+            DOCK_LEFT = (Args.getFlag('l') > 0);
+
+            IS_PLANET = (Args.getFlag('p') > 0);
 
             if (IS_PLANET) IS_BASE = true;
 
-            //int name_idx = parse.IndexOf("Name:");
-            //if (name_idx > 0)
-            //{
-            //    location_name = parse.Substring(name_idx).Split(:)
-            //}
+            List<string> nameArg = Args.getOption("name");
+
+            if (nameArg.Count > 0 && nameArg[0] != null)
+            {
+                location_name = nameArg[0];
+            }
 
             // Set all known blocks to null or clear lists
             lcdPanel = null;
@@ -165,6 +203,8 @@ namespace LaserComm
                 if (blk is IMyTextPanel)
                 {
                     lcdPanel = blk as IMyTextPanel;
+                    lcdPanel.ShowPublicTextOnScreen();
+                    lcdPanel.SetValueFloat("FontSize", 1.2f);
                 }
                 // Wico Area Network programmable block
                 else if (blk is IMyProgrammableBlock && !blk.Equals(Me))
@@ -204,9 +244,9 @@ namespace LaserComm
                     timer.SetValueFloat("TriggerDelay", 1.0f);
                 }
                 // Light (interior or spotlight) determines where we will land
-                else if (IS_BASE && IS_PLANET && blk is IMyLightingBlock)
+                else if (IS_BASE && IS_PLANET && blk is IMyInteriorLight)
                 {
-                    landLight = blk as IMyLightingBlock;
+                    landLight = blk as IMyInteriorLight;
                 }
                 // Landing gear....
                 else if (!IS_BASE && blk is IMyLandingGear)
@@ -316,9 +356,10 @@ namespace LaserComm
 
             catch { }
 
-            if (!connLock && (!all_blocks_found || blks.Count != num_blocks_found))
+            if (!connLock && (!all_blocks_found || blks.Count != num_blocks_found) || !oldPBName.Equals(Me.CustomName))
             {
                 init();
+                return;
             }
 
             #endregion
@@ -356,20 +397,6 @@ namespace LaserComm
 
                 return;
             }
-
-            #region debugPanelWrite
-            lcdPanel.WritePublicText("Destinations:\n");
-
-            foreach (var dst in destinations)
-            {
-                lcdPanel.WritePublicText("Name: " + dst.name + "\n", true);
-                lcdPanel.WritePublicText("Locations:\n", true);
-                foreach (var pt in dst.waypoints)
-                {
-                    lcdPanel.WritePublicText(pt + "\n", true);
-                }
-            }
-            #endregion
 
             if (args.Contains("STOP"))
             {
@@ -421,12 +448,13 @@ namespace LaserComm
             // For each destination base...
             foreach (var location in destinations)
             {
-
                 List<Vector3D> departurePoints = new List<Vector3D>();
                 List<Vector3D> approachPoints = new List<Vector3D>();
                 Vector3D destination = new Vector3D();
 
-                if (location.name.ToLower().Contains("planet"))
+                lcdPanel.WritePublicText("Travelling to " + location.name + "\n");
+
+                if (location.is_planet)
                 {
                     #region PLANET_AUTOPILOT
                     // Check landing gear existence
@@ -455,7 +483,7 @@ namespace LaserComm
                         ptName = ptName.ToLower();
 
                         // Case 1: orientation: Up for base = forward for us
-                        if (ptName.Contains("orientation") && ptName.Contains("up"))
+                        if (ptName.Contains("orientation") && ptName.Contains("forward"))
                         {
                             fwdOrient = vec;
                         }
@@ -481,6 +509,7 @@ namespace LaserComm
                         Echo("Error: no approach points");
                         yield return false;
                     }
+
 
                     remoteControl.AddWaypoint(approachPoints[0], "Approach");
 
@@ -551,14 +580,22 @@ namespace LaserComm
                         g.ApplyAction("Lock");
                     }
 
-                    // Wait certain amount of time before undocking
-                    long startTick = DateTime.Now.Ticks;
+                    connector.ApplyAction("Lock");
 
-                    while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
+                    string disembark = "We have arrived\nPlease disembark safely";
+                    lcdPanel.WritePublicText(disembark);
+
+                    // Wait certain amount of time before undocking
+                    DateTime end = DateTime.Now.AddSeconds(DOCKING_TIME_SECONDS);
+
+                    while (DateTime.Now.CompareTo(end) < 0)
                     {
                         Echo("Waiting to leave");
+                        lcdPanel.WritePublicText(disembark + "\n" + "Leaving in\n" + (end.Subtract(DateTime.Now)).ToString(@"hh\:mm\:ss"));
                         yield return true;
                     }
+
+                    lcdPanel.WritePublicText("Departing now");
 
                     // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
 
@@ -578,14 +615,13 @@ namespace LaserComm
                         g.ApplyAction("Unlock");
                     }
 
+                    connector.ApplyAction("Unlock");
+
                     // Cheap way of waiting 2 seconds for docking stuff to retract
                     for (int k = 0; k < 2; k++)
                     {
                         yield return true;
                     }
-                    
-
-                    
 
                     Echo("Autopilot enabled");
                     remoteControl.SetAutoPilotEnabled(true);
@@ -699,7 +735,7 @@ namespace LaserComm
                         yield return true;
                     }
 
-                    // We've arrived at the final destination
+
                     remoteControl.ClearWaypoints();
 
                     // Orient again
@@ -769,20 +805,26 @@ namespace LaserComm
 
                     Echo("Arrived at destination");
 
+                    string disembark = "We have arrived at\n" + location.name + "\nPlease disembark safely";
+                    lcdPanel.WritePublicText(disembark);
+
                     connector.ApplyAction("Lock");
 
                     // Wait certain amount of time before undocking
-                    long startTick = DateTime.Now.Ticks;
+                    DateTime end = DateTime.Now.AddSeconds(DOCKING_TIME_SECONDS);
 
-                    while (DateTime.Now.Ticks - startTick < 10000000L * DOCKING_TIME_SECONDS)
+                    while (DateTime.Now.CompareTo(end) < 0)
                     {
                         Echo("Waiting to undock");
+                        lcdPanel.WritePublicText(disembark + "\n" + "Leaving in\n" + (end.Subtract(DateTime.Now)).ToString(@"hh\:mm\:ss"));
                         yield return true;
                     }
 
                     // Recalculate offset; depending where the remote control block is, not having a good offset might mean a collision
 
                     offset = remoteControl.GetPosition() - connector.GetPosition();
+
+                    lcdPanel.WritePublicText("Departing from " + location.name);
 
                     connector.ApplyAction("Unlock");
 
@@ -892,8 +934,8 @@ namespace LaserComm
 
                 // Keep processing new messages until we timeout waiting for any more potential responses
                 // This is because we don't know how many locations may send in responses
-                long ticks = DateTime.Now.Ticks;
-                while (DateTime.Now.Ticks - ticks < 10000000L * SECONDS_TO_WAIT_FOR_RESPONSE)
+                DateTime end = DateTime.Now.AddSeconds(SECONDS_TO_WAIT_FOR_RESPONSE);
+                while (DateTime.Now.CompareTo(end) < 0)
                 {
 
                     // Now check text panel for response
@@ -901,14 +943,14 @@ namespace LaserComm
                     {
 
                         // timeout
-                        if (DateTime.Now.Ticks - ticks > 10000000 * SECONDS_TO_WAIT_FOR_RESPONSE)
+                        if (DateTime.Now.CompareTo(end) > 0)
                         {
                             Echo("Timed out waiting for (any more) responses");
                             yield return false;
                         }
                         else
                         {
-                            Echo("Waiting for responses...");
+                            lcdPanel.WritePublicText("Waiting to receive destinations\nPlease stand by.");
                             yield return true;
                         }
                     }
@@ -917,31 +959,28 @@ namespace LaserComm
                     string response = messageReceiver.GetPrivateText();
                     messageReceiver.WritePrivateText("");
 
-                    Echo("Processing responses");
+                    lcdPanel.WritePublicText("Processing new response");
                     string[] uniqueResponses = response.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
 
                     foreach (var resp in uniqueResponses)
                     {
                         string[] responseSplit = resp.Split('|');
 
+                        if (responseSplit.Length < 4)
+                        {
+                            Echo("Error: response not long enough");
+                            yield return false;
+                        }
+
                         List<string> wpts = new List<string>();
-                        for (int i = 2; i < responseSplit.Length; i++)
+                        for (int i = 4; i < responseSplit.Length; i++)
                         {
                             wpts.Add(responseSplit[i]);
                         }
 
-                        Destination dest = new Destination(wpts, responseSplit[1]);
-                        bool exists = false;
+                        Destination dest = new Destination(wpts, responseSplit[3], responseSplit[2], responseSplit[1]);
 
-                        foreach (var d in destinations)
-                        {
-                            if (d.name.Equals(dest.name))
-                            {
-                                exists = true;
-                            }
-                        }
-
-                        if (!exists)
+                        if (!destinations.Contains(dest))
                         {
                             destinations.Add(dest);
                         }
@@ -950,6 +989,22 @@ namespace LaserComm
 
                     yield return true;
                 }
+
+
+                #region debugPanelWrite
+                lcdPanel.WritePrivateText("Destinations:\n");
+
+                foreach (var dst in destinations)
+                {
+                    lcdPanel.WritePrivateText("Name: " + dst.name + "\n", true);
+                    lcdPanel.WritePrivateText("Unique ID: " + dst.unique_id + "\n", true);
+                    lcdPanel.WritePrivateText("Locations:\n", true);
+                    foreach (var pt in dst.waypoints)
+                    {
+                        lcdPanel.WritePrivateText(pt + "\n", true);
+                    }
+                }
+                #endregion
 
                 #endregion
             }
@@ -1057,27 +1112,34 @@ namespace LaserComm
                 // Add a small offset to that the autopilot will try and go slightly past the connector
                 finalPt += 0.2 * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
 
-                Vector3D finalApproach = DOCK_LEFT ? finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + FINAL_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
-                Vector3D beginApproach = DOCK_LEFT ? finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Left : finalPt + BEGIN_APPROACH_DIST * door.WorldMatrix.GetOrientation().Right;
+                Vector3D finalApproach = finalPt + FINAL_APPROACH_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Left : door.WorldMatrix.GetOrientation().Right);
+                Vector3D beginApproach = finalPt + BEGIN_APPROACH_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Left : door.WorldMatrix.GetOrientation().Right);
+
                 Vector3D departure = finalPt + DEPARTURE_DIST * (DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left);
 
                 Vector3D down = door.WorldMatrix.GetOrientation().Down;
                 Vector3D shipFwd = DOCK_LEFT ? door.WorldMatrix.GetOrientation().Right : door.WorldMatrix.GetOrientation().Left;
 
-                return new List<string> { "Space " + Runtime.LastRunTimeMs.ToString(), convertToGPS("Begin Approach", beginApproach), convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
+                return new List<string> { "Space", unique_id.ToString(), location_name, convertToGPS("Begin Approach", beginApproach),
+                    convertToGPS("Final Approach", finalApproach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure),
+                    convertToGPS("Orientation Down", down, '4'), convertToGPS("Orientation Forward", shipFwd, '4') };
                 #endregion
             }
             else
             {
                 #region PLANET_WAYPOINTS
-                Vector3D finalPt = landLight.GetPosition() + CONNECTOR_DIST * landLight.WorldMatrix.GetOrientation().Forward;
+                Vector3D finalPt = landLight.GetPosition();
 
-                Vector3D approach = finalPt + FINAL_APPROACH_PLANET * landLight.WorldMatrix.GetOrientation().Forward + FINAL_APPROACH_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
-                Vector3D departure = finalPt + DEPARTURE_PLANET * landLight.WorldMatrix.GetOrientation().Forward + DEPARTURE_PLANET / 2.0 * landLight.WorldMatrix.GetOrientation().Down;
+                Vector3D approach = finalPt + FINAL_APPROACH_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Left : landLight.WorldMatrix.GetOrientation().Right) + 
+                    landLight.WorldMatrix.GetOrientation().Forward) ;
 
-                Vector3D upOrient = landLight.WorldMatrix.GetOrientation().Up;
-                // Note: departure = approach
-                return new List<string> { "Planet " + Runtime.LastRunTimeMs.ToString(), convertToGPS("Approach", approach), convertToGPS("Destination", finalPt), convertToGPS("Departure", departure), convertToGPS("Orientation Up", upOrient, '4') };
+                Vector3D departure = finalPt + DEPARTURE_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Right : landLight.WorldMatrix.GetOrientation().Left) + 
+                    landLight.WorldMatrix.GetOrientation().Forward);
+
+                Vector3D orient = DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Right : landLight.WorldMatrix.GetOrientation().Left;
+
+                return new List<string> { "Planet", unique_id.ToString(), location_name, convertToGPS("Approach", approach), convertToGPS("Destination", finalPt),
+                    convertToGPS("Departure", departure), convertToGPS("Orientation Forward", orient, '4') };
                 #endregion
             }
 
@@ -1095,6 +1157,10 @@ namespace LaserComm
                 case 3: Echo("|"); break;
             }
         }
+
+        // From http://forum.keenswh.com/threads/snippet-baconargs-argument-parser.7387036/
+        // Last updated Sep 28 2016
+        public class BaconArgs { static public BaconArgs parse(string a) { return (new Parser()).parseArgs(a); } public class Parser { static Dictionary<string, BaconArgs> h = new Dictionary<string, BaconArgs>(); public BaconArgs parseArgs(string a) { if (!h.ContainsKey(a)) { var b = new BaconArgs(); var c = false; var d = false; var e = new StringBuilder(); for (int f = 0; f < a.Length; f++) { var g = a[f]; if (c) { e.Append(g); c = false; } else if (g.Equals('\\')) c = true; else if (d && !g.Equals('"')) e.Append(g); else if (g.Equals('"')) d = !d; else if (g.Equals(' ')) { b.add(e.ToString()); e.Clear(); } else e.Append(g); } if (e.Length > 0) b.add(e.ToString()); h.Add(a, b); } return h[a]; } } protected Dictionary<char, int> h = new Dictionary<char, int>(); protected List<string> i = new List<string>(); protected Dictionary<string, List<string>> j = new Dictionary<string, List<string>>(); public List<string> getArguments() { return i; } public int getFlag(char a) { return h.ContainsKey(a) ? h[a] : 0; } public List<string> getOption(string a) { return j.ContainsKey(a) ? j[a] : new List<string>(); } public void add(string a) { if (!a.StartsWith("-")) i.Add(a); else if (a.StartsWith("--")) { KeyValuePair<string, string> b = k(a); var c = b.Key.Substring(2); if (!j.ContainsKey(c)) j.Add(c, new List<string>()); j[c].Add(b.Value); } else { var b = a.Substring(1); for (int d = 0; d < b.Length; d++) if (this.h.ContainsKey(b[d])) { this.h[b[d]]++; } else { this.h.Add(b[d], 1); } } } KeyValuePair<string, string> k(string a) { string[] b = a.Split(new char[] { '=' }, 2); return new KeyValuePair<string, string>(b[0], (b.Length > 1) ? b[1] : null); } override public string ToString() { var a = new List<string>(); foreach (string key in j.Keys) a.Add(l(key) + ":[" + string.Join(",", j[key].ConvertAll<string>(b => l(b)).ToArray()) + "]"); var c = new List<string>(); foreach (char key in h.Keys) c.Add(key + ":" + h[key].ToString()); var d = new StringBuilder(); d.Append("{\"a\":["); d.Append(string.Join(",", i.ConvertAll<string>(b => l(b)).ToArray())); d.Append("],\"o\":[{"); d.Append(string.Join("},{", a)); d.Append("}],\"f\":[{"); d.Append(string.Join("},{", c)); d.Append("}]}"); return d.ToString(); } string l(string a) { return (a != null) ? "\"" + a.Replace(@"\", @"\\").Replace(@"""", @"\""") + "\"" : @"null"; } }
 
         //=======================================================================
         //////////////////////////END////////////////////////////////////////////
