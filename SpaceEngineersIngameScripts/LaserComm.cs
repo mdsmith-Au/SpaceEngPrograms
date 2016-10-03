@@ -40,7 +40,7 @@ namespace LaserComm
 
         private const int SECONDS_TO_WAIT_FOR_RESPONSE = 25;
 
-        private const int DOCKING_TIME_SECONDS = 20;
+        private const int DOCKING_TIME_SECONDS = 60;
 
         private const double LANDING_GEAR_HEIGHT = -1.6;
 
@@ -452,6 +452,8 @@ namespace LaserComm
                 List<Vector3D> approachPoints = new List<Vector3D>();
                 Vector3D destination = new Vector3D();
 
+                // Clear LCD because of SE bugs...
+                lcdPanel.WritePublicText("");
                 lcdPanel.WritePublicText("Travelling to " + location.name + "\n");
 
                 if (location.is_planet)
@@ -580,9 +582,7 @@ namespace LaserComm
                         g.ApplyAction("Lock");
                     }
 
-                    connector.ApplyAction("Lock");
-
-                    string disembark = "We have arrived\nPlease disembark safely";
+                    string disembark = "We have arrived at\n" + location.name + "\nPlease disembark safely";
                     lcdPanel.WritePublicText(disembark);
 
                     // Wait certain amount of time before undocking
@@ -592,6 +592,7 @@ namespace LaserComm
                     {
                         Echo("Waiting to leave");
                         lcdPanel.WritePublicText(disembark + "\n" + "Leaving in\n" + (end.Subtract(DateTime.Now)).ToString(@"hh\:mm\:ss"));
+                        connector.ApplyAction("Lock");
                         yield return true;
                     }
 
@@ -760,7 +761,8 @@ namespace LaserComm
                     while (remoteControl.IsAutoPilotEnabled)
                     {
                         // If connector becomes connected, disable autopilot
-                        if (connector.IsConnected)
+                        connector.ApplyAction("Lock");
+                        if (connector.IsLocked)
                         {
                             remoteControl.SetAutoPilotEnabled(false);
                         }
@@ -779,7 +781,8 @@ namespace LaserComm
                     while (!rotate(downOrient, remoteControl.WorldMatrix.GetOrientation().Down))
                     {
                         // If connector becomes connected, stop
-                        if (connector.IsConnected)
+                        connector.ApplyAction("Lock");
+                        if (connector.IsLocked)
                         {
                             resetGyros();
                             break;
@@ -792,7 +795,8 @@ namespace LaserComm
                     while (!rotate(fwdOrient, remoteControl.WorldMatrix.GetOrientation().Forward))
                     {
                         // If connector becomes connected, stop
-                        if (connector.IsConnected)
+                        connector.ApplyAction("Lock");
+                        if (connector.IsLocked)
                         {
                             resetGyros();
                             break;
@@ -808,6 +812,7 @@ namespace LaserComm
                     string disembark = "We have arrived at\n" + location.name + "\nPlease disembark safely";
                     lcdPanel.WritePublicText(disembark);
 
+                    // In case earlier locks didn't apply
                     connector.ApplyAction("Lock");
 
                     // Wait certain amount of time before undocking
@@ -932,6 +937,8 @@ namespace LaserComm
                     yield return false;
                 }
 
+                lcdPanel.WritePublicText("Waiting to receive destinations\nPlease stand by.\nDestinations:\n");
+
                 // Keep processing new messages until we timeout waiting for any more potential responses
                 // This is because we don't know how many locations may send in responses
                 DateTime end = DateTime.Now.AddSeconds(SECONDS_TO_WAIT_FOR_RESPONSE);
@@ -950,7 +957,6 @@ namespace LaserComm
                         }
                         else
                         {
-                            lcdPanel.WritePublicText("Waiting to receive destinations\nPlease stand by.");
                             yield return true;
                         }
                     }
@@ -959,7 +965,6 @@ namespace LaserComm
                     string response = messageReceiver.GetPrivateText();
                     messageReceiver.WritePrivateText("");
 
-                    lcdPanel.WritePublicText("Processing new response");
                     string[] uniqueResponses = response.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
 
                     foreach (var resp in uniqueResponses)
@@ -982,6 +987,7 @@ namespace LaserComm
 
                         if (!destinations.Contains(dest))
                         {
+                            lcdPanel.WritePublicText(" - " + dest.name + "\n", true);
                             destinations.Add(dest);
                         }
 
@@ -1130,10 +1136,10 @@ namespace LaserComm
                 #region PLANET_WAYPOINTS
                 Vector3D finalPt = landLight.GetPosition();
 
-                Vector3D approach = finalPt + FINAL_APPROACH_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Left : landLight.WorldMatrix.GetOrientation().Right) + 
-                    landLight.WorldMatrix.GetOrientation().Forward) ;
+                Vector3D approach = finalPt + FINAL_APPROACH_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Left : landLight.WorldMatrix.GetOrientation().Right) +
+                    landLight.WorldMatrix.GetOrientation().Forward);
 
-                Vector3D departure = finalPt + DEPARTURE_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Right : landLight.WorldMatrix.GetOrientation().Left) + 
+                Vector3D departure = finalPt + DEPARTURE_PLANET * ((DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Right : landLight.WorldMatrix.GetOrientation().Left) +
                     landLight.WorldMatrix.GetOrientation().Forward);
 
                 Vector3D orient = DOCK_LEFT ? landLight.WorldMatrix.GetOrientation().Right : landLight.WorldMatrix.GetOrientation().Left;
