@@ -22,21 +22,49 @@ namespace Experimental
         //////////////////////////BEGIN//////////////////////////////////////////
         //=======================================================================
 
-        const string DOCK_NAME = "[DOCK]";
+        const string sensor_name = "Sensor";
+        const string lcdname = "LCD Display";
 
-        IMyLandingGear gear;
+        IMySensorBlock sensor;
+        IMyTextPanel lcd;
 
         public Program()
         {
-            gear = GridTerminalSystem.GetBlockWithName("[DOCK] Landing Gear") as IMyLandingGear;
+            sensor = GridTerminalSystem.GetBlockWithName(sensor_name) as IMySensorBlock;
+            lcd = GridTerminalSystem.GetBlockWithName(lcdname) as IMyTextPanel;
+            lcd.ShowPublicTextOnScreen();
+            
         }
 
 
 
         public void Main(string args)
         {
-            printPropertiesAndActions(gear);
+            //printPropertiesAndActions(sensor
+            printDetectedObjects(sensor, lcd);
         }
+
+        private void printDetectedObjects(IMySensorBlock sens, IMyTextPanel lcd)
+        {
+            var det = new List<MyDetectedEntityInfo>();
+            sens.DetectedEntities(det);
+
+            lcd.WritePublicText("Detected " + det.Count + " entities.\n", false);
+
+            foreach (var d in det)
+            {
+
+                lcd.WritePublicText("ID: " + d.EntityId + "\n", true);
+                lcd.WritePublicText("Name: " + d.Name + "\n", true);
+                lcd.WritePublicText("Type: " + d.Type + "\n", true);
+                lcd.WritePublicText("Time(ms): " + d.TimeStamp + "\n", true);
+                lcd.WritePublicText("Pos: " + d.Position + "\n", true);
+                lcd.WritePublicText("Relation: " + d.Relationship + "\n", true);
+            }
+            
+
+        }
+
 
 
         public void Save()
@@ -66,11 +94,6 @@ namespace Experimental
                 Echo("ID: " + a.Id);
                 Echo("Name: " + a.Name);
             }
-        }
-
-        private bool isDock(IMyTerminalBlock blk)
-        {
-            return blk.CustomName.Contains(DOCK_NAME);
         }
 
         //=======================================================================

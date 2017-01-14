@@ -76,7 +76,7 @@
     <Compile Include="Old\Elevator2.cs" />
     <Compile Include="Old\Hangar.cs" />
     <Compile Include="Old\Hangar2.cs" />
-    <Compile Include="Shuttle.cs" />
+    <Compile Include="AutoDoor.cs" />
     <Compile Include="LaserComm.cs" />
     <Compile Include="Template.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
