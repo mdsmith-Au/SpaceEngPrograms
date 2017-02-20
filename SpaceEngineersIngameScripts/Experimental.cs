@@ -33,7 +33,6 @@ namespace Experimental
             sensor = GridTerminalSystem.GetBlockWithName(sensor_name) as IMySensorBlock;
             lcd = GridTerminalSystem.GetBlockWithName(lcdname) as IMyTextPanel;
             lcd.ShowPublicTextOnScreen();
-            
         }
 
 
