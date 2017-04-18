@@ -44,6 +44,9 @@ namespace AutoVent
         {
             setupComplete = false;
 
+            allBlocks = new List<IMyTerminalBlock>();
+            allBlocksTemp = new List<IMyTerminalBlock>();
+
             var grouped = GridTerminalSystem.GetBlockGroupWithName(TAG);
             if (grouped == null)
             {
@@ -51,7 +54,6 @@ namespace AutoVent
                 return false;
             }
 
-            allBlocks = new List<IMyTerminalBlock>();
             grouped.GetBlocks(allBlocks);
 
             vents = new List<IMyAirVent>();
@@ -61,8 +63,6 @@ namespace AutoVent
                 Echo("No air vents found");
                 return false;
             }
-
-            allBlocksTemp = new List<IMyTerminalBlock>();
 
             setupComplete = true;
             return true;
@@ -84,6 +84,8 @@ namespace AutoVent
                     return;
                 }
             }
+
+            airVentCheck();
 
             Turn();
         }
